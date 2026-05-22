@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-code-second-screen"
+version = "0.1.0"
+description = "Live agent telemetry dashboard for the Thermalright Trofeo Vision USB LCD"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "John Zheng", email = "bluevisor@gmail.com" }]
+keywords = ["claude-code", "thermalright", "trofeo-vision", "lcd", "raspberry-pi", "dashboard"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Graphics :: Presentation",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+dependencies = [
+    "PySide6>=6.6",
+    "pyusb>=1.2",
+    "trcc-linux>=9.6",
+]
+
+[project.scripts]
+agent-dashboard = "agent_dashboard.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/bluevisor/claude-code-second-screen"
+Issues = "https://github.com/bluevisor/claude-code-second-screen/issues"
+
+[tool.setuptools.packages.find]
+include = ["agent_dashboard*"]
+
+[tool.setuptools.package-data]
+agent_dashboard = ["../assets/fonts/*.ttf"]
