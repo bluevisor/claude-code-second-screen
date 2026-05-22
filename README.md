@@ -93,13 +93,17 @@ but only **matrix** is implemented today.
 
 The default look. Three-panel grid:
 
-- **Left** — Agent: status verb, current task, tool detail, progress bar, scrolling log
-- **Middle** — Model: name, version, latency, context bar, in/out + cache totals
-- **Right** — Quota: 5H / 7D rolling windows, server status, tok/min and req/min
+- **Left** — Agent: status verb (`Thinking…` / `Reading…` / `Working…` …), wrapped prompt, tool detail, scrolling log
+- **Middle** — Model: name, version, P50/P95 latency, in/out tokens, cache stats, context bar
+- **Right** — Quota: 5H / 7D rolling token + cost windows, recent sub-agent invocations
 
-Visual effects: phosphor glow on big text, falling katakana glyph rain,
-radial-masked hairline grid, animated scan-highlight on the activity bar,
-pulsing LIVE indicator, CRT scanlines + vignette.
+Top rail: agent label, cwd / git-branch / session-id chips, weekday + date.
+Footer: last-request / P95 / cache-hit stats, big wall-clock, timezone.
+
+Visual effects: falling katakana glyph rain in the gutters, radial-masked
+hairline grid, animated scan-highlight on the activity bar, CRT
+interlacing + subtle vignette, blinking cap-aligned caret next to the
+status verb.
 
 ![Matrix theme — demo mode](docs/screenshot-matrix-demo.jpg)
 
@@ -137,9 +141,12 @@ For Claude Code mode, `ClaudeCodeSource`:
    within the last 7 days, accumulating per-event token totals into a deque.
 2. On each tick (1 Hz), it `seek()`s past the previously-read offset of the
    active session file and parses only the new lines.
-3. Derives `agent.status` from the last event: open `tool_use` → `tool`;
-   recent assistant `text` → `writing`; trailing `thinking` block → `thinking`;
-   else `idle`.
+3. Derives `agent.status` from the most recent *meaningful* event (skipping
+   `last-prompt` / `permission-mode` / `system` / `file-history-snapshot`
+   metadata that Claude Code appends mid-turn): open `tool_use` → `tool`
+   with a tool-specific verb (`Reading…`, `Editing…`, `Running…`, etc.);
+   trailing `thinking` → `thinking`; recent assistant `text` → `writing`;
+   user-string prompt awaiting reply → `processing`; else `idle`.
 4. Sums every assistant message's `usage` into cumulative + rolling windows.
 
 For Codex mode, `CodexSource`:
@@ -155,12 +162,18 @@ For Codex mode, `CodexSource`:
 
 - **Matrix is the only theme.** Fantasy / Cozy / Studio (from the handoff
   bundle) aren't ported.
-- **`server.tokensRemainingMin` is 0.** Claude Code's jsonl doesn't carry
-  the API rate-limit response headers, so the "TOK/MIN" and "REQ/MIN" rows
-  are placeholders. (A future MITM proxy could fill these in.)
+- **No live rate-limit data.** Claude Code's jsonl doesn't carry the API
+  rate-limit response headers, so the dashboard relies on rolling token
+  totals it computes itself. (A future MITM proxy could surface real
+  `requests_remaining_min` / `tokens_remaining_min`.)
 - **Quota caps are auto-scaled** from observed usage rather than your
   actual plan limits. Adjust `cap_5h` / `cap_7d` in
   `telemetry/claude_code.py` if you want hard targets.
+- **5H cost is hidden on subscription plans.** When `quota.plan` starts
+  with `MAX` / `PRO` / `FREE` / `TEAM` the footer skips the dollar tally
+  since flat-fee billing makes the per-request total noise.
+- **Sub-agent panel populates only for Claude Code Agent/Task calls.**
+  Codex sessions don't surface an equivalent event today.
 - **Latency is a proxy** computed from inter-event timestamps in the
   jsonl, which includes human idle time. Don't read p95 as wall-clock API
   latency.

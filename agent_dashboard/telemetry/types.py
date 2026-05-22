@@ -43,7 +43,7 @@ class Agent:
     git_branch: str
     git_dirty: bool
     started_at: str
-    status: Literal["idle", "thinking", "tool", "writing", "error", "processing"]
+    status: Literal["idle", "thinking", "tool", "writing", "error", "processing", "waiting"]
     current_task: str
     current_tool: str | None
     detail: str

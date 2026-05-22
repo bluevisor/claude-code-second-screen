@@ -444,6 +444,7 @@ class ClaudeCodeSource:
     # while the assistant is actively working.
     _META_TYPES: frozenset[str] = frozenset({
         "last-prompt", "permission-mode", "summary", "system",
+        "file-history-snapshot",
     })
 
     def _derive_status(self, evs: list[dict[str, Any]], last_assistant_idx: int) -> tuple[str, str | None, str]:
@@ -497,7 +498,11 @@ class ClaudeCodeSource:
             kinds = [b.get("type") for b in (msg.get("content") or [])]
             if kinds and kinds[-1] == "thinking":
                 return ("thinking", None, "reasoning")
-            # else assistant just emitted text — if recent, still writing; else idle
+            # else assistant just emitted text — if recent, still writing;
+            # otherwise the turn is fully done → idle/standby. (Mid-task
+            # "waiting on user selection" is a different state and would
+            # need its own detection — Claude Code's jsonl doesn't surface
+            # a clean signal for permission prompts.)
             ts = _iso_to_ts(last.get("timestamp", ""))
             if ts > 0 and (time.time() - ts) < 3:
                 return ("writing", None, "drafting response")

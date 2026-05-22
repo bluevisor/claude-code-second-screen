@@ -48,6 +48,10 @@ BG_BOT      = QColor(1, 9, 10)
 
 STATUS_VERBS = {
     "idle":       "Standby…",
+    # "Waiting Input…" looks better semantically but doesn't always fit the
+    # 400px agent panel at 34pt ExtraBold; the agent panel falls back to this
+    # short form when the long one overflows.
+    "waiting":    "Waiting…",
     "processing": "Processing…",
     "thinking":   "Thinking…",
     "tool":       "Working…",
@@ -371,11 +375,10 @@ class MatrixThemeWidget(QWidget):
 
     def _draw_rail(self, p: QPainter, r: QRect) -> None:
         a = self.tel.agent
-        src = self.tel.source
         cx = r.left()
-        # Rail vertical center — matches the right-side LIVE chip mid so the
-        # left LED dot and right pulsing dot sit on the same line.
-        rail_mid = r.top() + 6 + 22 // 2  # chip top + chip h/2
+        # Rail vertical center — matches the chip mid so the LED dot and
+        # rail text sit on the same line.
+        rail_mid = r.top() + 6 + 22 // 2
 
         # LED — small 10px dot, faint 18px halo behind it, both centered on rail_mid.
         led_color = MAGENTA if a.status == "error" else (AMBER if a.status == "idle" else PHOSPHOR)
@@ -404,31 +407,17 @@ class MatrixThemeWidget(QWidget):
         ff = font(11, QFont.Normal)
         cx += self._text(p, cx, r.top() + 9, sess, ff, INK_FAINT) + 12
 
-        # right side: bare source dot + label only.
-        src_label = src
-        src_color = PHOSPHOR if src == "LIVE" else (AMBER if src == "STALE" else INK_FAINT)
-        src_f = font(11, QFont.Bold)
-        src_w = QFontMetrics(src_f).horizontalAdvance(src_label)
-        text_x = r.right() - src_w
-        dot_x = text_x - 16
-        pulse = 0.55 + 0.45 * (math.sin(self.blink * math.pi * 1.6) * 0.5 + 0.5)
-        halo = QColor(src_color)
-        halo.setAlpha(int(160 * pulse) if src == "LIVE" else 0)
-        if halo.alpha() > 0:
-            p.save()
-            p.setCompositionMode(QPainter.CompositionMode_Plus)
-            p.setPen(Qt.NoPen)
-            p.setBrush(halo)
-            p.drawEllipse(QRectF(dot_x - 5, rail_mid - 8.5, 17, 17))
-            p.restore()
-        p.setPen(Qt.NoPen)
-        p.setBrush(src_color)
-        p.drawEllipse(QRectF(dot_x, rail_mid - 3.5, 7, 7))
-        self._text(p, text_x, r.top() + 9, src_label, src_f, src_color)
+        # right side: weekday + date (replaces the old LIVE pulse + chip).
+        now = datetime.now()
+        date_text = f"{now.strftime('%A').upper()}  {now.month:02d}.{now.day:02d}.{now.year:04d}"
+        date_f = font(12, QFont.Bold)
+        date_w = QFontMetrics(date_f).horizontalAdvance(date_text)
+        date_x = r.right() - date_w
+        self._text(p, date_x, r.top() + 9, date_text, date_f, INK_DIM)
 
-        # separator — gradient line between left cluster and right cluster
+        # separator — gradient line between left cluster and date
         sep_left = cx + 4
-        sep_right = dot_x - 12
+        sep_right = date_x - 12
         if sep_right > sep_left:
             sep_grad = QLinearGradient(sep_left, 0, sep_right, 0)
             sep_grad.setColorAt(0.0, QColor(41, 255, 140, 0))
@@ -484,12 +473,19 @@ class MatrixThemeWidget(QWidget):
         # "Reading…" while a Read tool is open, not just "Working…".
         if a.status == "tool" and a.current_tool in TOOL_VERBS:
             verb = TOOL_VERBS[a.current_tool]
+        elif a.status == "waiting":
+            # Prefer the longer, more specific phrasing when there's room.
+            verb = "Waiting Input…"
         else:
             verb = STATUS_VERBS.get(a.status, a.status.title() + "…")
         vf = font(34, QFont.ExtraBold)
+        # Caret + a little breathing room cost ~26 px to the right of the verb.
+        max_verb_w = r.right() - 16 - cx - 26
+        if QFontMetrics(vf).horizontalAdvance(verb) > max_verb_w:
+            verb = STATUS_VERBS.get(a.status, verb)
         adv = draw_glow_text(p, cx, cy, verb, vf, PHOSPHOR, PHOSPHOR_SOFT, glow_alpha=70, glow_radius=5)
-        # blinking caret aligned to cap height of the verb (skip when idle).
-        if a.status != "idle":
+        # blinking caret aligned to cap height of the verb (skip when idle/waiting).
+        if a.status not in ("idle", "waiting"):
             blink_on = (self.blink % 1.0) < 0.5
             if blink_on:
                 vfm = QFontMetrics(vf)
@@ -777,10 +773,6 @@ class MatrixThemeWidget(QWidget):
         now = datetime.now()
         m = self.tel.model
         q = self.tel.quota
-        date_text = f"{now.strftime('%A').upper()}  {now.month:02d}.{now.day:02d}.{now.year:04d}"
-        date_f = font(12, QFont.Bold)
-        date_w = QFontMetrics(date_f).horizontalAdvance(date_text)
-        self._text(p, r.center().x() - date_w // 2, r.top() + 4, date_text, date_f, INK_FAINT)
 
         # left stats
         left_text_parts = [
@@ -789,7 +781,7 @@ class MatrixThemeWidget(QWidget):
             ("CACHE ", f"{int((m.cache_read_tokens / max(m.cache_read_tokens + m.input_tokens, 1)) * 100)}%"),
         ]
         lx = r.left() + 16
-        ly = r.center().y() - 2
+        ly = r.center().y() + 4  # nudge to vertical center after footer shrank
         for a_text, b_text in left_text_parts:
             adv = self._text(p, lx, ly, a_text, font(13, QFont.Bold), PHOSPHOR)
             lx += adv + 3
@@ -813,7 +805,11 @@ class MatrixThemeWidget(QWidget):
         s_w = cfm.horizontalAdvance(ss)
         total = h_w + c_w + m_w + c2_w + s_w
         x = r.center().x() - total // 2
-        y = r.top() + 20
+        # Centre the clock vertically inside the footer — equalise top/bottom
+        # spacing by aligning its cap-mid to the footer's geometric mid.
+        cap_top_offset = cfm.ascent() - cfm.capHeight()
+        y = r.center().y() - (cfm.capHeight() / 2) - cap_top_offset
+        y = int(y)
         draw_glow_text(p, x, y, hh, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4); x += h_w
         draw_glow_text(p, x, y, col_blink, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4); x += c_w
         draw_glow_text(p, x, y, mm, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4); x += m_w
@@ -852,19 +848,23 @@ class MatrixThemeWidget(QWidget):
 
         self._paint_bg(p)
 
-        # frame padding 14 vertical, 18 horizontal
-        pad_x, pad_y = 18, 14
+        # Frame padding: equal top/bottom so the clock has the same air above
+        # and below. Footer is slim so the panels still get the height boost.
+        pad_x = 18
+        pad_y_top = 12
+        pad_y_bot = 12
         frame_w = 1280 - 2 * pad_x
-        frame_h = 480 - 2 * pad_y
-        # rail 34, gap 10, main flex, gap 10, footer 64
+        # rail 34, gap 10, main flex, gap 8, footer 38.
         rail_h = 34
-        footer_h = 64
-        main_h = frame_h - rail_h - footer_h - 20  # two 10px gaps
+        footer_h = 38
+        gap_above_main = 10
+        gap_below_main = 8
+        main_h = 480 - pad_y_top - pad_y_bot - rail_h - footer_h - gap_above_main - gap_below_main
 
-        rail_rect = QRect(pad_x, pad_y, frame_w, rail_h)
-        main_top = pad_y + rail_h + 10
+        rail_rect = QRect(pad_x, pad_y_top, frame_w, rail_h)
+        main_top = pad_y_top + rail_h + gap_above_main
         main_rect = QRect(pad_x, main_top, frame_w, main_h)
-        footer_rect = QRect(pad_x, main_top + main_h + 10, frame_w, footer_h)
+        footer_rect = QRect(pad_x, main_top + main_h + gap_below_main, frame_w, footer_h)
 
         self._draw_rail(p, rail_rect)
 
