@@ -10,13 +10,14 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "John Zheng", email = "bluevisor@gmail.com" }]
-keywords = ["claude-code", "thermalright", "trofeo-vision", "lcd", "raspberry-pi", "dashboard"]
+keywords = ["claude-code", "codex", "openai", "thermalright", "trofeo-vision", "lcd", "raspberry-pi", "dashboard"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: X11 Applications :: Qt",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -26,8 +27,9 @@ classifiers = [
 ]
 dependencies = [
     "PySide6>=6.6",
-    "pyusb>=1.2",
     "trcc-linux>=9.6",
+    "pyusb>=1.2; sys_platform != 'darwin'",
+    "hidapi>=0.14; sys_platform == 'darwin'",
 ]
 
 [project.scripts]
@@ -41,4 +43,4 @@ Issues = "https://github.com/bluevisor/claude-code-second-screen/issues"
 include = ["agent_dashboard*"]
 
 [tool.setuptools.package-data]
-agent_dashboard = ["../assets/fonts/*.ttf"]
+agent_dashboard = ["../assets/fonts/*.ttf", "../assets/icons/*.png", "../assets/icons/*.svg"]

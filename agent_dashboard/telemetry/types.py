@@ -15,6 +15,17 @@ class LogEntry:
 
 
 @dataclass
+class SubAgent:
+    """A Claude Code `Agent` tool invocation tracked by id and live status."""
+
+    tool_use_id: str
+    subagent_type: str  # e.g. "Explore", "general-purpose"
+    description: str
+    status: Literal["running", "done", "error"]
+    started_at: str
+
+
+@dataclass
 class QuotaWindow:
     label: str
     used: float
@@ -32,7 +43,7 @@ class Agent:
     git_branch: str
     git_dirty: bool
     started_at: str
-    status: Literal["idle", "thinking", "tool", "writing", "error"]
+    status: Literal["idle", "thinking", "tool", "writing", "error", "processing"]
     current_task: str
     current_tool: str | None
     detail: str
@@ -41,6 +52,7 @@ class Agent:
     files_read: int
     files_edited: int
     log: list[LogEntry] = field(default_factory=list)
+    sub_agents: list[SubAgent] = field(default_factory=list)
 
     # internal demo state — not part of the contract
     _task_idx: int = 0

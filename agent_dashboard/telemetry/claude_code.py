@@ -43,6 +43,7 @@ from .types import (
     Quota,
     QuotaWindow,
     Server,
+    SubAgent,
     Telemetry,
 )
 
@@ -358,6 +359,7 @@ class ClaudeCodeSource:
 
         # log entries derived from recent events
         log_entries = self._derive_log(evs)
+        sub_agents = self._derive_sub_agents(evs)
 
         # latencies
         if self._latencies_ms:
@@ -393,7 +395,7 @@ class ClaudeCodeSource:
             git_dirty=_git_dirty(cwd) if cwd else False,
             started_at=started_at or datetime.now(timezone.utc).isoformat(),
             status=status,  # type: ignore[arg-type]
-            current_task=current_task[:160],
+            current_task=current_task[:280],
             current_tool=current_tool,
             detail=detail,
             progress=progress,
@@ -401,6 +403,7 @@ class ClaudeCodeSource:
             files_read=files_read,
             files_edited=files_edited,
             log=log_entries,
+            sub_agents=sub_agents,
         )
         model = Model(
             id=last_model_id or "claude",
@@ -435,12 +438,39 @@ class ClaudeCodeSource:
 
     # ── per-event derivations ────────────────────────────────────────────
 
+    # Claude Code appends `last-prompt` and `permission-mode` events to the
+    # jsonl as a turn progresses — they're session metadata, not agent state.
+    # Treating them as "the last event" makes our status fall through to idle
+    # while the assistant is actively working.
+    _META_TYPES: frozenset[str] = frozenset({
+        "last-prompt", "permission-mode", "summary", "system",
+    })
+
     def _derive_status(self, evs: list[dict[str, Any]], last_assistant_idx: int) -> tuple[str, str | None, str]:
         """Return (status, current_tool, detail)."""
         if not evs:
             return ("idle", None, "no events")
-        last = evs[-1]
+
+        # Find the most recent non-meta event.
+        last: dict[str, Any] | None = None
+        for ev in reversed(evs):
+            if ev.get("type") not in self._META_TYPES:
+                last = ev
+                break
+        if last is None:
+            return ("processing", None, "processing prompt")
         last_t = last.get("type")
+
+        # User-event handling — covers both the new-prompt gap (string
+        # content, no assistant reply yet → "Processing…") and the
+        # tool-result return (list content → "Thinking…", parsing result).
+        if last_t == "user":
+            c = (last.get("message") or {}).get("content")
+            if isinstance(c, str) and c.strip():
+                return ("processing", None, "processing prompt")
+            if isinstance(c, list):
+                return ("thinking", None, "parsing tool result")
+            return ("thinking", None, "parsing request context")
 
         # if last event is an assistant with a tool_use block, and no later
         # user.tool_result for that tool_use_id yet, status=tool.
@@ -473,15 +503,6 @@ class ClaudeCodeSource:
                 return ("writing", None, "drafting response")
             return ("idle", None, "awaiting next directive")
 
-        # user event last
-        if last_t == "user":
-            c = (last.get("message") or {}).get("content")
-            if isinstance(c, list):
-                # tool_result returned — assistant will continue soon. treat as thinking.
-                return ("thinking", None, "parsing tool result")
-            # plain user prompt — assistant about to respond
-            return ("thinking", None, "parsing request context")
-
         return ("idle", None, "—")
 
     def _derive_log(self, evs: list[dict[str, Any]]) -> list[LogEntry]:
@@ -495,7 +516,11 @@ class ClaudeCodeSource:
             t = ev.get("type")
             ts_iso = ev.get("timestamp", "")
             try:
-                ts = datetime.fromisoformat(ts_iso.replace("Z", "+00:00")).strftime("%H:%M:%S")
+                ts = (
+                    datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+                    .astimezone()  # UTC → local wall-clock so logs match the user's clock
+                    .strftime("%H:%M:%S")
+                )
             except Exception:
                 ts = "--:--:--"
             if t == "user":
@@ -533,6 +558,62 @@ class ClaudeCodeSource:
                         out.append(LogEntry(id=idn, ts=ts, tag="info", msg=f"tool.call  {nm}  {target}".strip()))
         # we walked newest→oldest; that's already the desired order (log[0] = newest)
         return out
+
+    def _derive_sub_agents(self, evs: list[dict[str, Any]]) -> list[SubAgent]:
+        """Extract Claude Code Agent tool invocations and their live status.
+
+        An ``Agent`` tool_use spawns a sub-agent; the matching ``tool_result``
+        (by ``tool_use_id``) signals completion. We pair them and return the
+        most-recent entries newest-first, capped at 8.
+        """
+        # First pass: collect tool_result blocks keyed by tool_use_id.
+        results: dict[str, dict[str, Any]] = {}
+        for ev in evs:
+            if ev.get("type") != "user":
+                continue
+            content = (ev.get("message") or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if block.get("type") == "tool_result":
+                    tid = block.get("tool_use_id")
+                    if tid:
+                        results[tid] = block
+
+        # Second pass: pull Agent tool_use blocks, pair with results.
+        found: list[SubAgent] = []
+        for ev in evs:
+            if ev.get("type") != "assistant":
+                continue
+            msg = ev.get("message") or {}
+            ts = ev.get("timestamp", "")
+            for block in msg.get("content") or []:
+                if block.get("type") != "tool_use":
+                    continue
+                if (block.get("name") or "") not in ("Agent", "Task"):
+                    continue
+                tid = block.get("id") or ""
+                inp = block.get("input") or {}
+                res = results.get(tid)
+                if res is None:
+                    status = "running"
+                elif res.get("is_error"):
+                    status = "error"
+                else:
+                    status = "done"
+                found.append(SubAgent(
+                    tool_use_id=tid,
+                    subagent_type=str(inp.get("subagent_type") or "general"),
+                    description=str(inp.get("description") or "")[:60],
+                    status=status,  # type: ignore[arg-type]
+                    started_at=ts,
+                ))
+
+        # Newest first, cap at 8. Sort running first so live work stays visible.
+        found.reverse()
+        running = [s for s in found if s.status == "running"]
+        finished = [s for s in found if s.status != "running"]
+        return (running + finished)[:8]
 
 
 def _ceil_nice(n: float) -> int:

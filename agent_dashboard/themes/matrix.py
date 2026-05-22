@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
+from functools import lru_cache
+
+from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (
@@ -16,10 +19,12 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
+    QImage,
     QLinearGradient,
     QPainter,
     QPaintEvent,
     QPen,
+    QPixmap,
     QPolygonF,
     QRadialGradient,
 )
@@ -42,14 +47,42 @@ BG_TOP      = QColor(2, 16, 12)
 BG_BOT      = QColor(1, 9, 10)
 
 STATUS_VERBS = {
-    "idle":     "STANDBY",
-    "thinking": "THINKING",
-    "tool":     "EXECUTING",
-    "writing":  "WRITING",
-    "error":    "ERROR",
+    "idle":       "Standby…",
+    "processing": "Processing…",
+    "thinking":   "Thinking…",
+    "tool":       "Working…",
+    "writing":    "Writing…",
+    "error":      "Error",
+}
+
+# tool name → gerund, used when status == "tool" so the verb is specific
+# (matches the in-terminal Claude Code styling — "Reading…", "Editing…").
+TOOL_VERBS = {
+    "Read":          "Reading…",
+    "Bash":          "Running…",
+    "Edit":          "Editing…",
+    "Write":         "Writing…",
+    "Grep":          "Searching…",
+    "Glob":          "Searching…",
+    "WebFetch":      "Fetching…",
+    "WebSearch":     "Searching…",
+    "Agent":         "Delegating…",
+    "Task":          "Delegating…",
+    "TodoWrite":     "Planning…",
+    "NotebookEdit":  "Editing…",
+    "Skill":         "Loading…",
+    "ToolSearch":    "Searching…",
+    "exec_command":  "Running…",
+    "apply_patch":   "Editing…",
+    "update_plan":   "Planning…",
+    "write_stdin":   "Typing…",
+    "read_mcp_resource": "Reading…",
+    "list_mcp_resources": "Listing…",
+    "tool_search_tool": "Searching…",
 }
 
 
+@lru_cache(maxsize=64)
 def font(size: int, weight: int = QFont.Normal) -> QFont:
     f = QFont("JetBrains Mono", size)
     f.setWeight(weight)
@@ -76,6 +109,30 @@ def fmt_dur(secs: float) -> str:
     return f"{secs // 60}m{secs % 60:02d}s"
 
 
+_BADGE_PIXMAP: QPixmap | None = None
+_BADGE_SCALED: dict[tuple[int, int], QPixmap] = {}
+_OPENAI_PIXMAP: QPixmap | None = None
+_OPENAI_SCALED: dict[tuple[int, int], QPixmap] = {}
+
+
+def _model_badge_pixmap() -> QPixmap:
+    """Lazy-load the model badge artwork once per process."""
+    global _BADGE_PIXMAP
+    if _BADGE_PIXMAP is None:
+        path = Path(__file__).resolve().parent.parent.parent / "assets" / "icons" / "anthropic-figure.png"
+        _BADGE_PIXMAP = QPixmap(str(path))
+    return _BADGE_PIXMAP
+
+
+def _openai_badge_pixmap() -> QPixmap:
+    """Lazy-load the OpenAI badge artwork once per process."""
+    global _OPENAI_PIXMAP
+    if _OPENAI_PIXMAP is None:
+        path = Path(__file__).resolve().parent.parent.parent / "assets" / "icons" / "openai-logo.png"
+        _OPENAI_PIXMAP = QPixmap(str(path))
+    return _OPENAI_PIXMAP
+
+
 def pct_class_color(headroom_pct: float) -> QColor:
     """headroom_pct = 100 - usage_pct. Mirrors pctClass() in helpers.jsx."""
     if headroom_pct < 10:
@@ -86,17 +143,27 @@ def pct_class_color(headroom_pct: float) -> QColor:
 
 
 class MatrixThemeWidget(QWidget):
-    def __init__(self, tel: Telemetry, parent: QWidget | None = None):
+    def __init__(
+        self,
+        tel: Telemetry,
+        parent: QWidget | None = None,
+        *,
+        show_rain: bool = True,
+        rain_fps: int = 12,
+    ):
         super().__init__(parent)
         self.tel = tel
         self.setFixedSize(1280, 480)
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)
         # blink phase advanced by the app on each render — drives caret, scan, rotation
         self.blink = 0.0
-        self.rain = RainPainter()
-        self.show_rain = True
+        self.rain = RainPainter(max_step_hz=rain_fps)
+        self.show_rain = show_rain
         # pre-rendered, radial-masked grid (built once)
         self._grid = build_grid_mask()
+        self._static_bg = self._build_static_bg()
+        self._scanline_opacity = 0.55
+        self._scanlines = self._build_scanline_overlay(self._scanline_opacity)
         # cached scratch for status verb's glow (rebuilt on demand)
         self._verb_glow: QImage | None = None
 
@@ -106,43 +173,59 @@ class MatrixThemeWidget(QWidget):
 
     # ── helpers ──────────────────────────────────────────────────────────
 
-    def _paint_bg(self, p: QPainter) -> None:
-        # main linear gradient
+    def _build_static_bg(self) -> QImage:
+        img = QImage(1280, 480, QImage.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        p = QPainter(img)
+        rect = QRect(0, 0, 1280, 480)
+
         grad = QLinearGradient(0, 0, 0, 480)
         grad.setColorAt(0, BG_TOP)
         grad.setColorAt(1, BG_BOT)
-        p.fillRect(self.rect(), grad)
+        p.fillRect(rect, grad)
 
-        # bottom-center phosphor glow
         rg = QRadialGradient(QPointF(640, 530), 700)
         rg.setColorAt(0, QColor(41, 255, 140, int(255 * 0.10)))
         rg.setColorAt(0.6, QColor(41, 255, 140, 0))
-        p.fillRect(self.rect(), rg)
+        p.fillRect(rect, rg)
 
-        # top-right magenta tint
         rg2 = QRadialGradient(QPointF(1280, 0), 800)
         rg2.setColorAt(0, QColor(255, 42, 109, int(255 * 0.07)))
         rg2.setColorAt(0.7, QColor(255, 42, 109, 0))
-        p.fillRect(self.rect(), rg2)
+        p.fillRect(rect, rg2)
 
-        # radial-masked hairline grid (pre-rendered, just blit)
         p.drawImage(0, 0, self._grid)
+        p.end()
+        return img
+
+    def _build_scanline_overlay(self, opacity: float) -> QImage:
+        img = QImage(1280, 480, QImage.Format_ARGB32_Premultiplied)
+        img.fill(0)
+        p = QPainter(img)
+        col = QColor(0, 0, 0, int(255 * 0.22 * opacity))
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        for y in range(0, 480, 2):
+            p.drawRect(0, y, 1280, 1)
+        rg = QRadialGradient(QPointF(640, 240), 760)
+        rg.setColorAt(0.55, QColor(0, 0, 0, 0))
+        rg.setColorAt(1.0, QColor(0, 0, 0, int(255 * 0.40)))
+        p.fillRect(QRect(0, 0, 1280, 480), rg)
+        p.end()
+        return img
+
+    def _paint_bg(self, p: QPainter) -> None:
+        p.drawImage(0, 0, self._static_bg)
 
         # glyph rain — Screen blend underneath the panels
         if self.show_rain:
             self.rain.step_and_paint(p, font(11, QFont.Medium), PHOSPHOR)
 
     def _draw_scanlines(self, p: QPainter, opacity: float = 0.55) -> None:
-        col = QColor(0, 0, 0, int(255 * 0.16 * opacity))
-        p.setPen(Qt.NoPen)
-        p.setBrush(col)
-        for y in range(0, 480, 3):
-            p.drawRect(0, y + 2, 1280, 1)
-        # vignette
-        rg = QRadialGradient(QPointF(640, 240), 720)
-        rg.setColorAt(0.6, QColor(0, 0, 0, 0))
-        rg.setColorAt(1.0, QColor(0, 0, 0, int(255 * 0.85)))
-        p.fillRect(self.rect(), rg)
+        if opacity != self._scanline_opacity:
+            self._scanline_opacity = opacity
+            self._scanlines = self._build_scanline_overlay(opacity)
+        p.drawImage(0, 0, self._scanlines)
 
     def _draw_panel(self, p: QPainter, r: QRect) -> None:
         # background gradient — mostly opaque so the rain doesn't bleed through
@@ -245,22 +328,62 @@ class MatrixThemeWidget(QWidget):
             s = s[:-1]
         return s + e
 
+    def _draw_wrapped_text(
+        self, p: QPainter, x: int, y: int, s: str, f: QFont, c: QColor,
+        *, max_w: int, max_lines: int = 2, line_h: int = 22,
+    ) -> int:
+        """Word-wrap ``s`` into at most ``max_lines`` lines, eliding the last.
+
+        Returns the number of lines actually drawn (≥1).
+        """
+        fm = QFontMetrics(f)
+        words = (s or "").split()
+        if not words:
+            return 1
+        lines: list[str] = []
+        cur = ""
+        for w in words:
+            candidate = w if not cur else cur + " " + w
+            if fm.horizontalAdvance(candidate) <= max_w:
+                cur = candidate
+                continue
+            if cur:
+                lines.append(cur)
+            if len(lines) >= max_lines - 1:
+                cur = w
+                break
+            cur = w
+        if cur and len(lines) < max_lines:
+            lines.append(cur)
+        # If still more words remain, fold them into the last line and elide.
+        if len(lines) == max_lines:
+            remaining_idx = sum(len(line.split()) for line in lines)
+            tail_words = words[remaining_idx:]
+            if tail_words:
+                lines[-1] = self._elide(lines[-1] + " " + " ".join(tail_words), f, max_w)
+            else:
+                lines[-1] = self._elide(lines[-1], f, max_w)
+        for i, line in enumerate(lines):
+            self._text(p, x, y + i * line_h, line, f, c)
+        return max(1, len(lines))
+
     # ── top rail ─────────────────────────────────────────────────────────
 
     def _draw_rail(self, p: QPainter, r: QRect) -> None:
         a = self.tel.agent
-        m = self.tel.model
         src = self.tel.source
         cx = r.left()
-        cy = r.top() + (r.height() - 12) // 2  # baseline-ish
+        # Rail vertical center — matches the right-side LIVE chip mid so the
+        # left LED dot and right pulsing dot sit on the same line.
+        rail_mid = r.top() + 6 + 22 // 2  # chip top + chip h/2
 
-        # LED
+        # LED — small 10px dot, faint 18px halo behind it, both centered on rail_mid.
         led_color = MAGENTA if a.status == "error" else (AMBER if a.status == "idle" else PHOSPHOR)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(led_color.red(), led_color.green(), led_color.blue(), 90))
-        p.drawEllipse(QRectF(cx - 4, cy - 4, 18, 18))
+        p.drawEllipse(QRectF(cx - 4, rail_mid - 9, 18, 18))
         p.setBrush(led_color)
-        p.drawEllipse(QRectF(cx, cy, 10, 10))
+        p.drawEllipse(QRectF(cx, rail_mid - 5, 10, 10))
         cx += 22
 
         # agent label (bold, 14px)
@@ -281,29 +404,13 @@ class MatrixThemeWidget(QWidget):
         ff = font(11, QFont.Normal)
         cx += self._text(p, cx, r.top() + 9, sess, ff, INK_FAINT) + 12
 
-        # right side: src badge + date + provider chip
-        # date YYYY.MM.DD
-        d = datetime.now()
-        date_str = f"{d.year:04d}.{d.month:02d}.{d.day:02d}"
-        # provider chip on far right
-        prov_text = m.provider.upper()
-        prov_w = self._chip_width(prov_text)
-        right_x = r.right() - prov_w
-        self._draw_chip(p, right_x, r.top() + 6, prov_text)
-
-        # date to the left of provider
-        date_f = font(11, QFont.Normal)
-        date_w = QFontMetrics(date_f).horizontalAdvance(date_str)
-        right_x -= date_w + 12
-        self._text(p, right_x, r.top() + 9, date_str, date_f, INK_DIM)
-
-        # source badge before date
+        # right side: bare source dot + label only.
         src_label = src
         src_color = PHOSPHOR if src == "LIVE" else (AMBER if src == "STALE" else INK_FAINT)
-        src_w = self._chip_width(src_label, font_=font(11, QFont.Bold))
-        # include leading dot ~14px
-        right_x -= (src_w + 14 + 8)
-        # pulsing dot
+        src_f = font(11, QFont.Bold)
+        src_w = QFontMetrics(src_f).horizontalAdvance(src_label)
+        text_x = r.right() - src_w
+        dot_x = text_x - 16
         pulse = 0.55 + 0.45 * (math.sin(self.blink * math.pi * 1.6) * 0.5 + 0.5)
         halo = QColor(src_color)
         halo.setAlpha(int(160 * pulse) if src == "LIVE" else 0)
@@ -312,17 +419,16 @@ class MatrixThemeWidget(QWidget):
             p.setCompositionMode(QPainter.CompositionMode_Plus)
             p.setPen(Qt.NoPen)
             p.setBrush(halo)
-            p.drawEllipse(QRectF(right_x + 1, r.top() + 7, 17, 17))
+            p.drawEllipse(QRectF(dot_x - 5, rail_mid - 8.5, 17, 17))
             p.restore()
         p.setPen(Qt.NoPen)
         p.setBrush(src_color)
-        p.drawEllipse(QRectF(right_x + 6, r.top() + 12, 7, 7))
-        # chip box
-        self._draw_chip(p, right_x + 17, r.top() + 6, src_label, color=src_color, font_=font(11, QFont.Bold))
+        p.drawEllipse(QRectF(dot_x, rail_mid - 3.5, 7, 7))
+        self._text(p, text_x, r.top() + 9, src_label, src_f, src_color)
 
         # separator — gradient line between left cluster and right cluster
         sep_left = cx + 4
-        sep_right = right_x - 8
+        sep_right = dot_x - 12
         if sep_right > sep_left:
             sep_grad = QLinearGradient(sep_left, 0, sep_right, 0)
             sep_grad.setColorAt(0.0, QColor(41, 255, 140, 0))
@@ -345,7 +451,9 @@ class MatrixThemeWidget(QWidget):
         p.setPen(QPen(PANEL_BORDER, 1))
         p.setBrush(Qt.NoBrush)
         p.drawRect(x, y, w, h)
-        self._text(p, x + 8, y + 5, text, f, color or INK_DIM)
+        # Text y+3 (not the visually-natural y+5) so the cap-mid lands on
+        # rail mid — keeps chip text aligned with bare text on the same row.
+        self._text(p, x + 8, y + 3, text, f, color or INK_DIM)
         return w
 
     # ── agent panel (left) ───────────────────────────────────────────────
@@ -357,13 +465,13 @@ class MatrixThemeWidget(QWidget):
         cy = r.top() + 14
 
         # title row
-        title_text = "▸ AGENT  ·  SESSION"
+        title_text = "▸ AGENT"
         tf = font(12, QFont.Bold)
         title_w = self._text(p, cx, cy, title_text, tf, PHOSPHOR)
         # meta to the right; clamp so it never crosses the title
         started_ts = datetime.fromisoformat(a.started_at.replace("Z", "+00:00")).timestamp()
         dur = max(0, int(datetime.now(timezone.utc).timestamp() - started_ts))
-        meta = f"TURN {a.turn} · {fmt_dur(dur)} · {a.files_read}R/{a.files_edited}W"
+        meta = f"T{a.turn} · {fmt_dur(dur)} · {a.files_read}R/{a.files_edited}W"
         f = font(10)
         fm = QFontMetrics(f)
         max_meta_w = (r.right() - 16) - (cx + title_w + 12)
@@ -372,60 +480,73 @@ class MatrixThemeWidget(QWidget):
 
         cy += 24
 
-        # status verb (big, with phosphor glow)
-        verb = STATUS_VERBS.get(a.status, a.status.upper())
+        # status verb (big). Tool-specific gerund takes priority so we say
+        # "Reading…" while a Read tool is open, not just "Working…".
+        if a.status == "tool" and a.current_tool in TOOL_VERBS:
+            verb = TOOL_VERBS[a.current_tool]
+        else:
+            verb = STATUS_VERBS.get(a.status, a.status.title() + "…")
         vf = font(34, QFont.ExtraBold)
         adv = draw_glow_text(p, cx, cy, verb, vf, PHOSPHOR, PHOSPHOR_SOFT, glow_alpha=70, glow_radius=5)
-        # blinking caret (skip when idle)
+        # blinking caret aligned to cap height of the verb (skip when idle).
         if a.status != "idle":
             blink_on = (self.blink % 1.0) < 0.5
             if blink_on:
-                caret = QRectF(cx + adv + 6, cy + 6, 13, 28)
+                vfm = QFontMetrics(vf)
+                cap_h = max(int(vfm.capHeight()), 18)
+                cap_top = cy + vfm.ascent() - cap_h
+                caret = QRectF(cx + adv + 6, cap_top, 13, cap_h)
                 p.fillRect(caret, PHOSPHOR)
-                # faint outer halo
                 p.save()
                 p.setCompositionMode(QPainter.CompositionMode_Plus)
                 p.setPen(Qt.NoPen)
                 p.setBrush(QColor(41, 255, 140, 30))
                 p.drawRect(caret.adjusted(-3, -2, 3, 2))
                 p.restore()
-        cy += 42
+        cy += 52  # gap below the big status verb
 
-        # current task
-        task_text = a.current_task
-        max_w = r.width() - 32 - 14
-        elided = self._elide(task_text, font(14), max_w)
-        self._text(p, cx, cy, "▸", font(14, QFont.Bold), PHOSPHOR)
-        self._text(p, cx + 14, cy, elided, font(14), INK)
-        cy += 22
+        # Current task: reserved area = 40% of the panel's height. Wrapped
+        # text fills from the top of the inner padded box.
+        prompt_area_h = int(r.height() * 0.40)
+        prompt_top = cy
+        pad_y = 8
+        pad_x = 6
+        task_f = font(12)
+        line_h = 17
+        body_x = cx + pad_x + 14
+        max_w = r.right() - 16 - pad_x - body_x
+        text_y = cy + pad_y
+        self._text(p, cx + pad_x, text_y, "▸", font(12, QFont.Bold), PHOSPHOR)
+        content_h = max(line_h, prompt_area_h - 2 * pad_y)
+        max_lines = max(2, content_h // line_h)
+        self._draw_wrapped_text(
+            p, body_x, text_y, a.current_task or "—", task_f, INK,
+            max_w=max_w, max_lines=max_lines, line_h=line_h,
+        )
+        cy = prompt_top + prompt_area_h
         # detail line
         detail_parts = []
         if a.current_tool:
             detail_parts.append(f"{a.current_tool}( … )")
         detail_parts.append(a.detail)
         detail = "  ".join(detail_parts)
-        self._text(p, cx + 14, cy, self._elide(detail, font(11), max_w - 14), font(11), INK_FAINT)
+        self._text(p, body_x, cy, self._elide(detail, font(11), max_w), font(11), INK_FAINT)
         cy += 22
-
-        # progress bar with sweeping scan highlight
-        bar_rect = QRectF(cx, cy, r.width() - 32, 6)
-        self._draw_track(p, bar_rect, a.progress, PHOSPHOR, scan=True)
-        cy += 18
 
         # log rows (newest at top — column-reverse means index 0 is at bottom in JSX,
         # but our painter draws top-down; index 0 is most recent and at the top.)
         log_area_top = cy
         log_area_bot = r.bottom() - 12
-        row_h = 17
+        row_h = 15
         max_rows = max(0, (log_area_bot - log_area_top) // row_h)
         for i, row in enumerate(self.tel.agent.log[:max_rows]):
             ry = log_area_top + i * row_h
-            self._text(p, cx, ry, row.ts, font(11), INK_FAINT)
+            self._text(p, cx, ry, row.ts, font(10), INK_FAINT)
             tag_color = {"ok": PHOSPHOR, "warn": AMBER, "err": MAGENTA, "info": CYAN}.get(row.tag, INK_DIM)
             tag_glyph = {"ok": "✓", "warn": "!", "err": "✗", "info": "·"}.get(row.tag, "·")
-            self._text(p, cx + 75, ry, tag_glyph, font(11, QFont.Bold), tag_color)
-            msg = self._elide(row.msg, font(11), r.width() - 32 - 96)
-            self._text(p, cx + 96, ry, msg, font(11), INK)
+            self._text(p, cx + 68, ry, tag_glyph, font(10, QFont.Bold), tag_color)
+            msg = self._elide(row.msg, font(10), r.width() - 32 - 88)
+            self._text(p, cx + 86, ry, msg, font(10), INK)
 
     # ── model panel (middle) ─────────────────────────────────────────────
 
@@ -435,23 +556,22 @@ class MatrixThemeWidget(QWidget):
         cx = r.left() + 16
         cy = r.top() + 14
 
-        # title + model id (truncated)
+        # title (redundant "claude-opus-4-7" id removed — the big CLAUDE OPUS
+        # name + v-pill below already covers it).
         self._text(p, cx, cy, "▸ MODEL  ·  ACTIVE", font(12, QFont.Bold), PHOSPHOR)
-        f = font(11)
-        fm = QFontMetrics(f)
-        id_text = self._elide(m.id, f, int(r.width() * 0.45))
-        self._text(p, r.right() - 16 - fm.horizontalAdvance(id_text), cy, id_text, f, INK_FAINT)
 
         cy += 22
 
-        # modhead: name + sub on left, badge on right. Left column shares row
-        # with the 62×62 badge, so it must clip to (width - 62 - 14).
-        modhead_top = cy
-        badge_x = r.right() - 16 - 62
-        self._draw_model_badge(p, QRectF(badge_x, modhead_top, 62, 62))
-        left_w = r.width() - 32 - 62 - 14
+        # modhead: name + sub on left, badge on right.
+        badge_size = 84
+        badge_x = r.right() - 16 - badge_size
+        left_w = r.width() - 32 - badge_size - 14
 
         name_f = font(22, QFont.ExtraBold)
+        name_fm = QFontMetrics(name_f)
+        name_mid = cy + name_fm.ascent() - name_fm.capHeight() / 2
+        badge_y = int(name_mid - badge_size / 2)
+        self._draw_model_badge(p, QRectF(badge_x, badge_y, badge_size, badge_size))
         # Compose name + v-pill within left_w. Elide name if needed.
         v_text = f"v{m.version}"
         vf = font(10, QFont.Bold)
@@ -463,20 +583,26 @@ class MatrixThemeWidget(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(PHOSPHOR)
         p.drawRect(cx + nw + 8, cy + 8, v_w_pill, 18)
-        self._text(p, cx + nw + 8 + 7, cy + 11, v_text, vf, QColor(2, 24, 15))
+        # Center text optically in the 18 px pill (cap-mid lines up with mid).
+        self._text(p, cx + nw + 8 + 7, cy + 8 + 3, v_text, vf, QColor(2, 24, 15))
         cy += 32
 
-        # sub-line below the name, still inside left column
-        sub = f"{m.provider.upper()}  ·  P50 {int(m.p50_ms)}MS  ·  P95 {int(m.p95_ms)}MS  ·  LAST {int(m.last_request_ms)}MS"
+        # sub-line below the name, still inside left column. LAST is shown
+        # in the footer already, so we keep this row to P50/P95.
+        sub = f"P50 {int(m.p50_ms)}MS · P95 {int(m.p95_ms)}MS"
         self._text(p, cx, cy, self._elide(sub, font(11), left_w), font(11), INK_DIM)
         # advance past badge bottom
-        cy = modhead_top + 62 + 14
+        cy = max(cy + 16, badge_y + badge_size) + 14
 
         # specs grid 2×2
         spec_w = (r.width() - 32 - 12) // 2
         spec_h = 42
+        ctx_max_str = (
+            f"{m.context_max/1_000_000:.0f}M" if m.context_max >= 1_000_000
+            else f"{int(m.context_max/1000)}K"
+        )
         specs = [
-            ("CONTEXT WINDOW", f"{int(m.context_max/1000)}K", "tok"),
+            ("CONTEXT WINDOW", ctx_max_str, "tok"),
             ("TOKENS IN · OUT", f"{fmt_tok(m.input_tokens)} / {fmt_tok(m.output_tokens)}", ""),
             ("CACHE READ", f"{m.cache_read_tokens/1e6:.2f}M", "tok"),
             ("CACHE HIT", f"{(m.cache_read_tokens / max(m.cache_read_tokens + m.input_tokens, 1)) * 100:.1f}", "%"),
@@ -499,6 +625,7 @@ class MatrixThemeWidget(QWidget):
         cy += 2 * (spec_h + 7) + 4
 
         # context bar
+        cy += 6  # breathing room below the spec grid
         ctx_pct = max(0.0, min(100.0, (m.context_used / max(m.context_max, 1)) * 100))
         ctx_color = MAGENTA if ctx_pct > 90 else AMBER if ctx_pct > 75 else PHOSPHOR
         self._text(p, cx, cy, "CONTEXT", font(11), INK_DIM)
@@ -506,44 +633,67 @@ class MatrixThemeWidget(QWidget):
         rf = font(11)
         rfm = QFontMetrics(rf)
         self._text(p, r.right() - 16 - rfm.horizontalAdvance(right_text), cy, right_text, rf, INK)
-        cy += 16
+        cy += 22
         self._draw_track(p, QRectF(cx, cy, r.width() - 32, 7), ctx_pct, ctx_color)
 
     def _draw_model_badge(self, p: QPainter, r: QRectF) -> None:
-        # outer border
-        p.setPen(QPen(PANEL_BORDER, 1))
-        p.setBrush(Qt.NoBrush)
-        p.drawRect(r)
-        # radial soft glow
-        cx, cy = r.center().x(), r.center().y()
-        rg = QRadialGradient(QPointF(cx, cy), r.width() / 2)
-        rg.setColorAt(0, PHOSPHOR_SOFT)
-        rg.setColorAt(1, QColor(0, 0, 0, 0))
-        p.fillRect(r, rg)
-        # dashed inner circle, rotated by blink
-        angle = (self.blink * 45) % 360
-        p.save()
-        p.translate(cx, cy)
-        p.rotate(angle)
-        dash = QPen(QColor(41, 255, 140, int(255 * 0.6)), 1, Qt.DashLine)
-        p.setPen(dash)
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(QPointF(0, 0), r.width() / 2 - 8, r.height() / 2 - 8)
-        p.restore()
-        # central glyph
-        gf = font(20, QFont.ExtraBold)
-        p.setFont(gf)
-        p.setPen(PHOSPHOR)
-        fm = QFontMetrics(gf)
-        s = "Σ"
-        p.drawText(QPointF(cx - fm.horizontalAdvance(s) / 2, cy + fm.ascent() / 2 - 2), s)
+        if self.tel.model.provider != "anthropic":
+            cx, cy = r.center().x(), r.center().y()
+            rg = QRadialGradient(QPointF(cx, cy), r.width() / 2)
+            rg.setColorAt(0, QColor(42, 240, 255, int(255 * 0.14)))
+            rg.setColorAt(1, QColor(0, 0, 0, 0))
+            p.fillRect(r, rg)
+            p.save()
+            p.translate(cx, cy)
+            p.rotate((self.blink * 35) % 360)
+            p.setPen(QPen(QColor(42, 240, 255, int(255 * 0.70)), 1, Qt.DashLine))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QPointF(0, 0), r.width() / 2 - 9, r.height() / 2 - 9)
+            p.restore()
+            pix = _openai_badge_pixmap()
+            if pix.isNull():
+                return
+            logo_size = int(min(r.width(), r.height()) * 0.64)
+            key = (logo_size, logo_size)
+            scaled = _OPENAI_SCALED.get(key)
+            if scaled is None:
+                scaled = pix.scaled(
+                    key[0], key[1],
+                    Qt.KeepAspectRatio, Qt.SmoothTransformation,
+                )
+                _OPENAI_SCALED[key] = scaled
+            p.drawPixmap(
+                int(cx - scaled.width() / 2),
+                int(cy - scaled.height() / 2),
+                scaled,
+            )
+            return
+
+        # No border, no background — just the figure floating against the
+        # panel. Larger and pushed flush with the top of its reserved box.
+        pix = _model_badge_pixmap()
+        if pix.isNull():
+            return
+        key = (int(r.width()), int(r.height()))
+        scaled = _BADGE_SCALED.get(key)
+        if scaled is None:
+            scaled = pix.scaled(
+                key[0], key[1],
+                Qt.KeepAspectRatio, Qt.FastTransformation,
+            )
+            _BADGE_SCALED[key] = scaled
+        cx = r.center().x()
+        p.drawPixmap(
+            int(cx - scaled.width() / 2),
+            int(r.top()),
+            scaled,
+        )
 
     # ── quota panel (right) ──────────────────────────────────────────────
 
     def _draw_quota_panel(self, p: QPainter, r: QRect) -> None:
         self._draw_panel(p, r)
         q = self.tel.quota
-        s = self.tel.server
         cx = r.left() + 16
         cy = r.top() + 14
 
@@ -556,7 +706,7 @@ class MatrixThemeWidget(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(PHOSPHOR)
         p.drawRect(r.right() - 16 - pw, cy, pw, ph)
-        self._text(p, r.right() - 16 - pw + 8, cy + 4, q.plan, plan_f, QColor(2, 20, 13))
+        self._text(p, r.right() - 16 - pw + 8, cy + 3, q.plan, plan_f, QColor(2, 20, 13))
         cy += 24
 
         # quota windows
@@ -572,9 +722,9 @@ class MatrixThemeWidget(QWidget):
             total_w = vfm.horizontalAdvance(vals) + pfm2.horizontalAdvance(pct_text)
             self._text(p, r.right() - 16 - total_w, cy, vals, vf, INK)
             self._text(p, r.right() - 16 - pfm2.horizontalAdvance(pct_text), cy, pct_text, font(11, QFont.Bold), color)
-            cy += 18
+            cy += 22
             self._draw_track(p, QRectF(cx, cy, r.width() - 32, 7), pct, color)
-            cy += 11
+            cy += 13
             # foot: resets + cost
             self._text(p, cx, cy, f"resets {fmt_dur(w.reset_in_sec)}", font(10), INK_FAINT)
             cost_text = f"${w.cost_usd:.2f} spent"
@@ -582,52 +732,44 @@ class MatrixThemeWidget(QWidget):
             self._text(p, r.right() - 16 - cfm.horizontalAdvance(cost_text), cy, cost_text, font(10), INK_FAINT)
             cy += 16
 
-        # server load section
+        # ── sub-agents section ───────────────────────────────────────────
         cy += 4
-        # dashed top border
         pen = QPen(QColor(41, 255, 140, int(255 * 0.18)), 1, Qt.DashLine)
         p.setPen(pen)
         p.drawLine(cx, cy, r.right() - 16, cy)
         cy += 6
 
-        # SERVER LOAD header + status pill
-        self._text(p, cx, cy, "SERVER LOAD", font(11, QFont.Bold), INK_FAINT)
-        srv_color = PHOSPHOR if s.status == "operational" else (AMBER if s.status == "degraded" else MAGENTA)
-        srv_text = f"{s.provider_label} · {s.status.upper()}"
-        sf = font(10, QFont.Bold)
-        sfm = QFontMetrics(sf)
-        # dot + text
-        text_w = sfm.horizontalAdvance(srv_text)
-        sx = r.right() - 16 - text_w
-        p.setPen(Qt.NoPen)
-        p.setBrush(srv_color)
-        p.drawEllipse(QRectF(sx - 12, cy + 4, 7, 7))
-        self._text(p, sx, cy, srv_text, sf, srv_color)
+        subs = self.tel.agent.sub_agents
+        running_n = sum(1 for s in subs if s.status == "running")
+        header = "▸ SUB-AGENTS"
+        self._text(p, cx, cy, header, font(11, QFont.Bold), PHOSPHOR)
+        if subs:
+            count_text = f"{running_n} live · {len(subs)} recent"
+            cfm = QFontMetrics(font(10))
+            self._text(p, r.right() - 16 - cfm.horizontalAdvance(count_text), cy + 2,
+                       count_text, font(10), INK_FAINT)
         cy += 18
 
-        # tok/min and req/min meters
-        tok_used = s.tokens_limit_min - s.tokens_remaining_min
-        req_used = s.requests_limit_min - s.requests_remaining_min
-        tok_pct = max(0.0, min(100.0, tok_used / max(s.tokens_limit_min, 1) * 100))
-        req_pct = max(0.0, min(100.0, req_used / max(s.requests_limit_min, 1) * 100))
+        if not subs:
+            self._text(p, cx, cy, "(none in this session)", font(11), INK_DIM)
+            return
 
-        for label, used, total, pct in [("TOK/MIN", tok_used, s.tokens_limit_min, tok_pct), ("REQ/MIN", req_used, s.requests_limit_min, req_pct)]:
-            color = pct_class_color(100 - pct)
-            self._text(p, cx, cy, label, font(10, QFont.Bold), INK_FAINT)
-            track_x = cx + 64
-            track_w = r.width() - 32 - 64 - 90
-            self._draw_track(p, QRectF(track_x, cy + 2, track_w, 7), pct, color)
-            val_text = f"{fmt_tok(used)} / {fmt_tok(total)}"
-            vfm = QFontMetrics(font(11, QFont.Bold))
-            self._text(p, r.right() - 16 - vfm.horizontalAdvance(val_text), cy, val_text, font(11, QFont.Bold), INK)
-            cy += 14
-
-        # foot row
-        cy += 4
-        retries_color = AMBER if s.retries_hour > 0 else INK
-        errors_color = MAGENTA if s.errors_hour > 0 else INK
-        foot_text = f"resets {fmt_dur(s.reset_in_sec)}    retries/hr {s.retries_hour}    errors/hr {s.errors_hour}    inflight {s.queued_requests}"
-        self._text(p, cx, cy, self._elide(foot_text, font(10), r.width() - 32), font(10), INK_FAINT)
+        row_h = 16
+        max_rows = max(0, (r.bottom() - 12 - cy) // row_h)
+        for sa in subs[:max_rows]:
+            glyph_color = {
+                "running": PHOSPHOR,
+                "done": INK_DIM,
+                "error": MAGENTA,
+            }.get(sa.status, INK_DIM)
+            glyph = {"running": "●", "done": "✓", "error": "✗"}.get(sa.status, "·")
+            self._text(p, cx, cy, glyph, font(11, QFont.Bold), glyph_color)
+            type_text = sa.subagent_type[:14]
+            type_w = self._text(p, cx + 16, cy, type_text, font(11, QFont.Bold), INK)
+            desc_x = cx + 16 + type_w + 8
+            desc = self._elide(sa.description, font(11), r.right() - 16 - desc_x)
+            self._text(p, desc_x, cy, desc, font(11), INK_DIM)
+            cy += row_h
 
     # ── footer ───────────────────────────────────────────────────────────
 
@@ -635,6 +777,11 @@ class MatrixThemeWidget(QWidget):
         now = datetime.now()
         m = self.tel.model
         q = self.tel.quota
+        date_text = f"{now.strftime('%A').upper()}  {now.month:02d}.{now.day:02d}.{now.year:04d}"
+        date_f = font(12, QFont.Bold)
+        date_w = QFontMetrics(date_f).horizontalAdvance(date_text)
+        self._text(p, r.center().x() - date_w // 2, r.top() + 4, date_text, date_f, INK_FAINT)
+
         # left stats
         left_text_parts = [
             (f"{int(m.last_request_ms)}", "ms last"),
@@ -642,7 +789,7 @@ class MatrixThemeWidget(QWidget):
             ("CACHE ", f"{int((m.cache_read_tokens / max(m.cache_read_tokens + m.input_tokens, 1)) * 100)}%"),
         ]
         lx = r.left() + 16
-        ly = r.center().y() - 8
+        ly = r.center().y() - 2
         for a_text, b_text in left_text_parts:
             adv = self._text(p, lx, ly, a_text, font(13, QFont.Bold), PHOSPHOR)
             lx += adv + 3
@@ -655,8 +802,9 @@ class MatrixThemeWidget(QWidget):
         ss = f"{now.second:02d}"
         clock_f = font(36, QFont.ExtraBold)
         cfm = QFontMetrics(clock_f)
-        # build manually to color the seconds in phosphor
-        col_blink = ":" if (self.blink % 1.0) < 0.5 else " "
+        # Colon flashes at 0.5 Hz (1 s on, 1 s off) — toggles on each whole
+        # second of the wall clock.
+        col_blink = ":" if now.second % 2 == 0 else " "
         # measure widths
         h_w = cfm.horizontalAdvance(hh)
         c_w = cfm.horizontalAdvance(col_blink)
@@ -665,35 +813,35 @@ class MatrixThemeWidget(QWidget):
         s_w = cfm.horizontalAdvance(ss)
         total = h_w + c_w + m_w + c2_w + s_w
         x = r.center().x() - total // 2
-        y = r.center().y() - cfm.height() // 2
+        y = r.top() + 20
         draw_glow_text(p, x, y, hh, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4); x += h_w
         draw_glow_text(p, x, y, col_blink, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4); x += c_w
         draw_glow_text(p, x, y, mm, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4); x += m_w
         draw_glow_text(p, x, y, col_blink, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4); x += c2_w
-        draw_glow_text(p, x, y, ss, clock_f, PHOSPHOR, PHOSPHOR_SOFT, glow_alpha=80, glow_radius=5)
+        draw_glow_text(p, x, y, ss, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4)
 
         # right stats
-        day = now.strftime("%A").upper()
-        off = -datetime.now().astimezone().utcoffset().total_seconds() / 60
-        sign = "+" if off >= 0 else "-"
-        absm = int(abs(off))
+        # Fixed sign — earlier code negated the offset and produced UTC+07:00
+        # for a UTC-07:00 host. Use the actual offset directly.
+        offset_min = datetime.now().astimezone().utcoffset().total_seconds() / 60
+        sign = "+" if offset_min >= 0 else "-"
+        absm = int(abs(offset_min))
         tz = f"UTC{sign}{absm // 60:02d}:{absm % 60:02d}"
-        # 5H cost
-        cost = q.windows[0].cost_usd if q.windows else 0.0
-        cost_text = f"5H  ${cost:.2f}"
         rf = font(13)
         rfm = QFontMetrics(rf)
         # right-align
         rx = r.right() - 16
-        # cost first (rightmost)
-        cw = rfm.horizontalAdvance(cost_text)
-        self._text(p, rx - cw, ly, cost_text, font(13, QFont.Bold), PHOSPHOR)
-        rx -= cw + 16
+        # 5H cost — only meaningful on per-token API billing. Subscription
+        # plans (Max/Pro) charge a flat fee, so the dollar tally is noise.
+        is_subscription = q.plan.upper().startswith(("MAX", "PRO", "FREE", "TEAM"))
+        if not is_subscription:
+            cost = q.windows[0].cost_usd if q.windows else 0.0
+            cost_text = f"5H  ${cost:.2f}"
+            cw = rfm.horizontalAdvance(cost_text)
+            self._text(p, rx - cw, ly, cost_text, font(13, QFont.Bold), PHOSPHOR)
+            rx -= cw + 16
         tw = rfm.horizontalAdvance(tz)
         self._text(p, rx - tw, ly, tz, rf, INK_DIM)
-        rx -= tw + 16
-        dw = rfm.horizontalAdvance(day)
-        self._text(p, rx - dw, ly, day, rf, INK_DIM)
 
     # ── main paint ───────────────────────────────────────────────────────
 

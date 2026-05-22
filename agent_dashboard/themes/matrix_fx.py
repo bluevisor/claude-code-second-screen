@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import random
+import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -43,8 +44,10 @@ class RainPainter:
     W = 1280
     H = 480
 
-    def __init__(self) -> None:
+    def __init__(self, max_step_hz: int = 12) -> None:
         self.cols = self.W // self.FONT_SIZE
+        self.max_step_hz = max_step_hz
+        self._last_step = 0.0
         self.drops = [
             _Drop(
                 y=-random.random() * 40,
@@ -62,7 +65,7 @@ class RainPainter:
         dx = min(x, self.W - x) / self.W   # 0 at edge, 0.5 at center
         return 0.06 + max(0.0, 0.16 - dx) * 1.6
 
-    def step_and_paint(self, p: QPainter, font: QFont, accent: QColor) -> None:
+    def _step(self, font: QFont, accent: QColor, frame_scale: float) -> None:
         # 1. fade the buffer slightly to leave trails behind
         bp = QPainter(self._buf)
         bp.setCompositionMode(QPainter.CompositionMode_DestinationIn)
@@ -89,12 +92,22 @@ class RainPainter:
                 trail = QColor(180, 255, 220, int(255 * a))
                 bp.setPen(trail)
                 bp.drawText(x, int((d.y - i) * self.FONT_SIZE), random.choice(_GLYPHS))
-            d.y += d.speed
+            d.y += d.speed * frame_scale
             if d.y * self.FONT_SIZE > self.H + d.length * self.FONT_SIZE:
                 d.y = -random.random() * 20
                 d.speed = 0.4 + random.random() * 0.9
                 d.length = 6 + random.randint(0, 15)
         bp.end()
+
+    def step_and_paint(self, p: QPainter, font: QFont, accent: QColor) -> None:
+        now = time.monotonic()
+        step_interval = 1 / self.max_step_hz if self.max_step_hz > 0 else 0
+        should_step = self._last_step == 0.0 or step_interval == 0 or (now - self._last_step) >= step_interval
+        if should_step:
+            elapsed = (now - self._last_step) if self._last_step else (1 / 15)
+            frame_scale = max(0.5, min(3.0, elapsed * 15))
+            self._step(font, accent, frame_scale)
+            self._last_step = now
 
         # 3. composite onto target painter at 'screen' blend (additive-ish)
         p.save()
@@ -153,42 +166,16 @@ def draw_glow_text(
     glow_alpha: int = 90,
     glow_radius: int = 4,
 ) -> int:
-    """Draw text with a soft phosphor glow.
-
-    Cheap multi-offset technique: draw the text several times at offsets in
-    glow color with low alpha (composited via Plus), then draw the sharp text
-    on top in the foreground color.
-
-    Returns the advance width of the text.
+    """Draw sharp text. The glow passes were removed because they blurred
+    badly on the LCD; signature is preserved so call sites don't churn.
     """
+    del glow_color, glow_alpha, glow_radius  # intentionally unused
     fm = QFontMetrics(font)
     adv = fm.horizontalAdvance(text)
     baseline = y + fm.ascent()
-
     p.save()
     p.setFont(font)
     p.setRenderHint(QPainter.TextAntialiasing, True)
-
-    # multi-offset blur pass (additive)
-    p.setCompositionMode(QPainter.CompositionMode_Plus)
-    g = QColor(glow_color)
-    g.setAlpha(glow_alpha)
-    p.setPen(g)
-    r = glow_radius
-    for dx, dy in [
-        (-r, 0), (r, 0), (0, -r), (0, r),
-        (-r, -r), (r, r), (-r, r), (r, -r),
-    ]:
-        p.drawText(x + dx, baseline + dy, text)
-    # tighter halo
-    g2 = QColor(glow_color)
-    g2.setAlpha(int(glow_alpha * 1.6))
-    p.setPen(g2)
-    for dx, dy in [(-2, 0), (2, 0), (0, -2), (0, 2)]:
-        p.drawText(x + dx, baseline + dy, text)
-
-    # sharp foreground
-    p.setCompositionMode(QPainter.CompositionMode_SourceOver)
     p.setPen(color)
     p.drawText(x, baseline, text)
     p.restore()

@@ -6,7 +6,7 @@ Live agent telemetry on a USB second screen. Built for the
 
 ![Matrix theme — live Claude Code session](docs/screenshot-matrix-live.jpg)
 
-Renders the current Claude Code session's status — what tool is running,
+Renders the current Claude Code or Codex session's status — what tool is running,
 which model, context window fill, rolling 5-hour / 7-day token totals, log of
 recent tool calls — directly onto a USB-attached LCD so you can glance at
 your agent without alt-tabbing.
@@ -15,19 +15,23 @@ The dashboard ships in two modes:
 
 | Mode | Data source | Use it for |
 |---|---|---|
-| `--source claude-code` *(default)* | `~/.claude/projects/**/*.jsonl` | Your actual Claude Code session |
+| `--source auto` *(default)* | Newest Claude Code or Codex jsonl | Your active local agent session |
+| `--source claude-code` | `~/.claude/projects/**/*.jsonl` | Your actual Claude Code session |
+| `--source codex` | `~/.codex/sessions/**/*.jsonl` | Your actual Codex session |
 | `--source demo` | Built-in state-machine simulator | Showroom / no Claude installed |
 
 ## Hardware
 
 - **LCD**: Thermalright Trofeo Vision (or any other [TRCC-supported](https://github.com/Lexonight1/thermalright-trcc-linux) LCD — protocol is auto-detected). 1280×480 is the design target; other resolutions will letterbox or scale.
-- **Host**: any Linux box with USB and Python 3.11+. Tested on a Raspberry Pi 5 / arm64.
+- **Host**: Linux or macOS box with USB and Python 3.11+. Tested on a Raspberry Pi 5 / arm64 and on macOS.
 
 The LCD handshake and frame-push are handled by the excellent
 [`thermalright-trcc-linux`](https://github.com/Lexonight1/thermalright-trcc-linux)
-project — see *Credits* below.
+project — see *Credits* below. On Linux it speaks to the LCD via libusb;
+on macOS the kernel's `IOHIDFamily` claims HID interfaces and won't release
+them, so we go through `hidapi` (IOHIDManager) instead.
 
-## Quick start
+## Quick start (Linux)
 
 ```bash
 # 1. Get TRCC's HID driver + udev rules
@@ -40,10 +44,26 @@ trcc setup -y                # installs udev rules (one sudo prompt)
 git clone https://github.com/bluevisor/claude-code-second-screen.git
 cd claude-code-second-screen
 python3 -m venv .venv
-.venv/bin/pip install PySide6 pyusb
+.venv/bin/pip install -e .
 
 # 3. Run
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m agent_dashboard
+```
+
+## Quick start (macOS)
+
+```bash
+# 1. System libs
+brew install hidapi python@3.11
+
+# 2. Get this project
+git clone https://github.com/bluevisor/claude-code-second-screen.git
+cd claude-code-second-screen
+python3.11 -m venv .venv
+.venv/bin/pip install -e .
+
+# 3. Run (no udev / no sudo needed — hidapi uses IOHIDManager)
+.venv/bin/python -m agent_dashboard
 ```
 
 The first frame should appear on the LCD within ~2 seconds.
@@ -51,12 +71,17 @@ The first frame should appear on the LCD within ~2 seconds.
 ## CLI flags
 
 ```
---source {claude-code,demo}    telemetry source (default: claude-code; falls back to demo)
---mirror                       also show a window on the desktop (useful for dev)
---no-lcd                       don't push to LCD (window only)
---fps N                        render+push framerate (default 15)
---sim-ms N                     demo state-machine tick interval (default 380)
---quality N                    JPEG quality 1-100 (default 85)
+--source {auto,claude-code,codex,demo}  telemetry source (default: newest live session)
+--demo-agent {claude-code,codex,...}    demo agent profile
+--demo-model {sonnet45,gpt5,...}        demo model profile
+--mirror                                also show a window on the desktop
+--no-lcd                                don't push to LCD
+--fps N                                 render+push framerate (default 15)
+--sim-ms N                              demo state-machine tick interval (default 380)
+--quality N                             JPEG quality 1-100 (default 85)
+--no-rain                               disable matrix rain for more render headroom
+--rain-fps N                            max matrix rain update rate (default 12)
+--stats                                 log render/JPEG/send timings every 5s
 ```
 
 ## Themes
@@ -90,7 +115,8 @@ agent_dashboard/
 ├── telemetry/
 │   ├── types.py         # AgentTelemetry dataclasses
 │   ├── demo.py          # State-machine simulator (port of useTelemetryDemo)
-│   └── claude_code.py   # Tails ~/.claude/projects/**/*.jsonl
+│   ├── claude_code.py   # Tails ~/.claude/projects/**/*.jsonl
+│   └── codex.py         # Tails ~/.codex/sessions/**/*.jsonl
 └── themes/
     ├── matrix.py        # Matrix theme widget (QPainter)
     └── matrix_fx.py     # Rain painter, masked grid, glow-text helper
@@ -99,7 +125,11 @@ agent_dashboard/
 The render loop is a `QTimer` ticking at `--fps`: it calls `widget.render(QImage)`
 to capture an offscreen 1280×480 image, encodes JPEG, and hands it to
 `HidDeviceType2.send_frame()` which the LCD JPEG-detects via the `FF D8`
-magic bytes. The whole loop is <10 ms per frame on a Pi 5.
+magic bytes. The app reuses the offscreen frame and JPEG encoder between
+ticks, caches static background/scanline layers, caches model badge scaling,
+and throttles the glyph rain with `--rain-fps` so the expensive animation work
+does not have to run for every pushed frame. Use `--stats` to see measured
+render, JPEG encode, and USB send time.
 
 For Claude Code mode, `ClaudeCodeSource`:
 
@@ -111,6 +141,15 @@ For Claude Code mode, `ClaudeCodeSource`:
    recent assistant `text` → `writing`; trailing `thinking` block → `thinking`;
    else `idle`.
 4. Sums every assistant message's `usage` into cumulative + rolling windows.
+
+For Codex mode, `CodexSource`:
+
+1. Tails the newest rollout under `~/.codex/sessions/**/*.jsonl`.
+2. Reads `session_meta` / `turn_context` for cwd, model, and session id.
+3. Derives status from unmatched `response_item/function_call` records,
+   `function_call_output`, reasoning events, and user/agent messages.
+4. Uses `event_msg/token_count` for cumulative, current-context, and rolling
+   5-hour / 7-day token totals.
 
 ## Limitations
 
@@ -126,8 +165,9 @@ For Claude Code mode, `ClaudeCodeSource`:
   jsonl, which includes human idle time. Don't read p95 as wall-clock API
   latency.
 - **Single active session.** The dashboard always shows the
-  most-recently-modified jsonl. If you run multiple Claude Code sessions in
-  parallel, the focus switches whenever one writes a new event.
+  most-recently-modified jsonl for the selected source. In `--source auto`,
+  the focus switches to whichever of Claude Code or Codex has the newest
+  session file.
 
 ## Credits
 
