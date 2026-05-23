@@ -24,7 +24,7 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
 
     private(set) var resolution: (Int, Int) = (1280, 480)
 
-    private let logger = Logger(subsystem: "tech.bluevisor.TrofeoVision",
+    private let logger = Logger(subsystem: "tech.bluevisor.NeoDashboard",
                                 category: "LCD.Driver")
     private var manager: IOHIDManager?
     private var device: IOHIDDevice?

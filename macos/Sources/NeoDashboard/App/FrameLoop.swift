@@ -15,7 +15,7 @@ import os.log
 @MainActor
 final class FrameLoop {
     private weak var env: AppEnvironment?
-    private let logger = Logger(subsystem: "tech.bluevisor.TrofeoVision",
+    private let logger = Logger(subsystem: "tech.bluevisor.NeoDashboard",
                                 category: "FrameLoop")
     private let encoder = JPEGEncoder()
     private var renderer: FrameRenderer = MatrixRenderer()
@@ -25,12 +25,25 @@ final class FrameLoop {
     private var blink: Double = 0
     private var telTimer: Timer?
     private var frameTimer: Timer?
-    private let workQueue = DispatchQueue(label: "tech.bluevisor.TrofeoVision.render",
+    private let workQueue = DispatchQueue(label: "tech.bluevisor.NeoDashboard.render",
                                           qos: .userInteractive)
     private var lcdOpen = false
     /// Set while a render+send is in flight on workQueue. New ticks bail when
     /// this is true so the clock can't lag behind a backed-up HID pipeline.
     private let renderInFlight = OSAllocatedUnfairLock(initialState: false)
+
+    /// Transition state between dashboard ↔ clock fallback. A swap fades
+    /// the *current* renderer out to black, switches, then fades the new
+    /// renderer back in. Computed each tick from absolute timestamps so
+    /// the coalescer dropping frames doesn't stall the animation.
+    private enum FadeState {
+        case idle
+        case fadingOut(start: Date)
+        case fadingIn(start: Date)
+    }
+    private var fadeState: FadeState = .idle
+    private var currentIsClock: Bool = false
+    private static let fadeDuration: TimeInterval = 0.35
 
     init(env: AppEnvironment) {
         self.env = env
@@ -52,8 +65,11 @@ final class FrameLoop {
     }
 
     private func scheduleTimers(fps: Int) {
-        // Telemetry at 1 Hz (live sources only grow at turn boundaries).
-        let tel = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+        // Telemetry at 4 Hz. Sources tail by file size and early-exit when
+        // nothing has changed, so the extra polling is essentially free —
+        // and it lets fast tools (Read, Glob, …) actually appear on the
+        // dashboard before the user's tool-result event closes the window.
+        let tel = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
                 let tel = self.env?.source.tick() ?? .empty()
@@ -93,13 +109,16 @@ final class FrameLoop {
         blink += 1.0 / max(1, Double(env.targetFPS))
         let phase = blink
 
+        // Drive the fade state machine on the main actor before handing the
+        // result off to the work queue. The active renderer + black overlay
+        // alpha are decided here so the worker doesn't touch shared state.
+        let (activeRenderer, blackAlpha) = stepFade(wantsClock: !tel.hasContent, now: now)
+
         workQueue.async { [weak self] in
             guard let self else { return }
             defer { self.renderInFlight.withLock { $0 = false } }
-            // Source has nothing live → render the clock fallback instead
-            // of the user's selected dashboard.
-            let activeRenderer: FrameRenderer = tel.hasContent ? self.renderer : self.clockRenderer
-            guard let raw = activeRenderer.render(tel, blink: phase, now: now) else { return }
+            guard let base = activeRenderer.render(tel, blink: phase, now: now) else { return }
+            let raw = Self.applyBlackOverlay(base, alpha: blackAlpha) ?? base
             // LCD gets the oriented frame; preview stays in the native
             // landscape so the user can still read it on screen.
             let lcdImg = Self.oriented(raw, rotation: rotation,
@@ -114,6 +133,57 @@ final class FrameLoop {
                 env.updatePreview(image: raw)
             }
         }
+    }
+
+    /// Drives the dashboard↔clock fade machine. Returns the renderer that
+    /// should produce the next frame and the black-overlay alpha to apply
+    /// on top of it (0 = full image, 1 = pure black).
+    private func stepFade(wantsClock: Bool, now: Date)
+        -> (FrameRenderer, Double)
+    {
+        switch fadeState {
+        case .idle:
+            if wantsClock != currentIsClock {
+                fadeState = .fadingOut(start: now)
+            }
+        case .fadingOut(let start):
+            let progress = min(1, now.timeIntervalSince(start) / Self.fadeDuration)
+            if progress >= 1 {
+                currentIsClock = wantsClock
+                fadeState = .fadingIn(start: now)
+                return (currentIsClock ? clockRenderer : renderer, 1)
+            }
+            return (currentIsClock ? clockRenderer : renderer, progress)
+        case .fadingIn(let start):
+            let progress = min(1, now.timeIntervalSince(start) / Self.fadeDuration)
+            if progress >= 1 {
+                fadeState = .idle
+                return (currentIsClock ? clockRenderer : renderer, 0)
+            }
+            return (currentIsClock ? clockRenderer : renderer, 1 - progress)
+        }
+        return (currentIsClock ? clockRenderer : renderer, 0)
+    }
+
+    /// Composite a black rectangle of the given alpha over the source —
+    /// used by the fade transitions. Returns nil only on allocation
+    /// failure; callers fall back to the source image.
+    private static func applyBlackOverlay(_ src: CGImage, alpha: Double) -> CGImage? {
+        guard alpha > 0 else { return src }
+        let w = src.width, h = src.height
+        guard let ctx = CGContext(
+            data: nil,
+            width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: w, height: h)
+        ctx.draw(src, in: rect)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(min(1, max(0, alpha))).cgColor)
+        ctx.fill(rect)
+        return ctx.makeImage()
     }
 
     /// Apply rotation + flip to the rendered canvas. Returns nil only on a

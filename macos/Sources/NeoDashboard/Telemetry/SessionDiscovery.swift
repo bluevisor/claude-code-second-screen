@@ -97,7 +97,11 @@ enum SessionDiscovery {
         for url in items where url.pathExtension == "json" {
             guard let data = try? Data(contentsOf: url),
                   let any = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            guard (any["kind"] as? String) == "interactive",
+            // Accept both "interactive" (the user's terminal CLI) and "bg"
+            // (background-mode sessions like Claude Code in agent loops);
+            // both write rollouts to the same projects directory.
+            let kind = (any["kind"] as? String) ?? ""
+            guard kind == "interactive" || kind == "bg",
                   let sessionId = any["sessionId"] as? String,
                   let cwd = any["cwd"] as? String,
                   let pid = any["pid"] as? Int else { continue }

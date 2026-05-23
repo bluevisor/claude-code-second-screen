@@ -1,5 +1,5 @@
 // Shared state that the menu bar, preview window, and frame loop all
-// reach into. Owned by `TrofeoVisionApp` and passed via @Environment.
+// reach into. Owned by `NeoDashboardApp` and passed via @Environment.
 
 import Combine
 import Foundation
@@ -11,7 +11,7 @@ final class AppEnvironment: ObservableObject {
     /// through this back-reference to wire startup into AppKit's lifecycle.
     private(set) static var shared: AppEnvironment?
 
-    /// Called from `TrofeoVisionApp.init()` before SwiftUI has constructed
+    /// Called from `NeoDashboardApp.init()` before SwiftUI has constructed
     /// the StateObject. We just register a one-shot resolver that the first
     /// `init()` writes to `shared`.
     static func installSharedInstance() {
@@ -63,12 +63,14 @@ final class AppEnvironment: ObservableObject {
         var label: String { "\(rawValue)°" }
     }
 
-    /// Which on-screen layout the LCD is showing. Only the Matrix dashboard
-    /// is implemented today; the enum is the seam future modes (clock,
-    /// system stats, slideshow, …) plug into.
+    /// Which on-screen layout the LCD is showing. Matrix + Cozy are full
+    /// render pipelines; `wow` and `animalCrossing` are static-image
+    /// placeholders until those layouts get implemented.
     enum RenderMode: String, CaseIterable, Identifiable {
         case matrixDashboard = "Matrix"
-        case animalCrossing = "Cozy"
+        case cozy = "Cozy"
+        case wow = "WoW"
+        case animalCrossing = "Animal Crossing"
         var id: String { rawValue }
     }
 
@@ -142,6 +144,7 @@ final class AppEnvironment: ObservableObject {
 
     func start() {
         FontRegistration.registerOnce()
+        WeatherService.shared.start()
         let loop = FrameLoop(env: self)
         self.loop = loop
         loop.start()

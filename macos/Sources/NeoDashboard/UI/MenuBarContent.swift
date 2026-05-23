@@ -33,7 +33,7 @@ struct MenuBarContent: View {
                 .frame(width: 10, height: 10)
                 .overlay(Circle().stroke(.white.opacity(0.15), lineWidth: 1))
             VStack(alignment: .leading, spacing: 1) {
-                Text("Trofeo Vision")
+                Text("NeoDashboard")
                     .font(.headline)
                 Text(lcdSummary)
                     .font(.caption)
@@ -86,7 +86,6 @@ struct MenuBarContent: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            modeRow
             sourceRow
             if env.mode == .matrixDashboard {
                 Toggle("Matrix rain", isOn: $env.showRain)
@@ -94,21 +93,6 @@ struct MenuBarContent: View {
                     .font(.callout)
                     .onChange(of: env.showRain) { _, _ in env.loop?.reconfigure() }
             }
-        }
-    }
-
-    private var modeRow: some View {
-        HStack(spacing: 8) {
-            Text("Mode")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .leading)
-            Picker("", selection: $env.mode) {
-                ForEach(AppEnvironment.RenderMode.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .onChange(of: env.mode) { _, _ in env.loop?.reconfigure() }
         }
     }
 

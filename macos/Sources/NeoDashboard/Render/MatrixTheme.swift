@@ -25,9 +25,10 @@ enum MatrixTheme {
     // MARK: - Fonts
 
     /// Multiplier applied to every `font(…)` call so the dashboard can be
-    /// retuned in one place. Bumped from 1.0 after the first hardware test
-    /// showed the panel was readable but a touch small.
-    static let fontScale: CGFloat = 1.12
+    /// retuned in one place. Bumped progressively after hardware tests —
+    /// 1.12 → 1.25 made the rail/panel copy comfortably readable from a
+    /// normal desk distance.
+    static let fontScale: CGFloat = 1.25
 
     /// JetBrains Mono in the requested point size and weight.
     /// Falls back to `Menlo` when the bundled font isn't registered yet.
@@ -58,7 +59,7 @@ enum MatrixTheme {
     static let statusVerbs: [AgentStatus: String] = [
         .idle: "Standby…",
         .waiting: "Waiting…",
-        .processing: "Processing…",
+        .processing: "Vibing…",
         .thinking: "Thinking…",
         .tool: "Working…",
         .writing: "Writing…",

@@ -18,8 +18,12 @@ enum FrameRendererFactory {
         switch mode {
         case .matrixDashboard:
             return MatrixRenderer(showRain: showRain)
-        case .animalCrossing:
+        case .cozy:
             return AnimalCrossingRenderer()
+        case .wow:
+            return ImageRenderer(resourceName: "wow-placeholder")
+        case .animalCrossing:
+            return ImageRenderer(resourceName: "animal-crossing-placeholder")
         }
     }
 }

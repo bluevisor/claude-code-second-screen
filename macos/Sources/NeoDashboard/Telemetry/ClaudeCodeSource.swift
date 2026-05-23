@@ -20,7 +20,7 @@ final class ClaudeCodeSource: TelemetrySource {
     let label = "Claude Code"
 
     private let projectsDir: URL
-    private let logger = Logger(subsystem: "tech.bluevisor.TrofeoVision",
+    private let logger = Logger(subsystem: "tech.bluevisor.NeoDashboard",
                                 category: "ClaudeCode")
     private var plan: String
 
@@ -52,7 +52,25 @@ final class ClaudeCodeSource: TelemetrySource {
             bootstrapTokenHistoryFromOtherSessions()
             scannedOtherSessions = true
         }
-        return buildTelemetry()
+        return promoteByRegistryStatus(buildTelemetry())
+    }
+
+    /// Claude's "Searching…" / "Thinking…" UI states sit between jsonl
+    /// events — the assistant has fired off an API call but no new line
+    /// has arrived. The sessions registry still flips `status: busy` for
+    /// those gaps, so we use it to lift the dashboard out of "Standby…"
+    /// when the jsonl-based derivation would otherwise return `.idle`.
+    private func promoteByRegistryStatus(_ tel: Telemetry) -> Telemetry {
+        guard tel.hasContent, tel.agent.status == .idle,
+              let url = jsonl else { return tel }
+        let busy = SessionDiscovery.active().contains {
+            $0.jsonl == url && $0.busy
+        }
+        guard busy else { return tel }
+        var out = tel
+        out.agent.status = .processing
+        out.agent.detail = "waiting on api response"
+        return out
     }
 
     /// Pin the source to a specific session jsonl. Passing nil reverts to
@@ -363,7 +381,8 @@ final class ClaudeCodeSource: TelemetrySource {
             contextUsed: ctxUsed, contextMax: contextMax,
             inputTokens: totalIn, outputTokens: totalOut,
             cacheReadTokens: totalCR, cacheWriteTokens: totalCC,
-            p50ms: p50, p95ms: p95, lastRequestMs: lastMs
+            p50ms: p50, p95ms: p95, lastRequestMs: lastMs,
+            latencyHistory: latencies
         )
         _ = family // reserved for plan-pricing dispatch in the future
         let quota = Quota(
@@ -391,8 +410,15 @@ final class ClaudeCodeSource: TelemetrySource {
         -> (AgentStatus, String?, String)
     {
         if events.isEmpty { return (.idle, nil, "no events") }
-        let last = events.reversed().first { !Self.metaTypes.contains($0.type) }
-        guard let ev = last else {
+        // Claude Code interleaves the conversation with hook output
+        // (`attachment`), title/agent metadata (`ai-title`, `agent-name`),
+        // queue ops, and snapshot bookkeeping. None of those reflect agent
+        // state — only `user` and `assistant` lines do — so walk back to
+        // the most recent one and ignore everything else.
+        let ev = events.reversed().first {
+            $0.type == "user" || $0.type == "assistant"
+        }
+        guard let ev else {
             return (.processing, nil, "processing prompt")
         }
 
@@ -401,10 +427,14 @@ final class ClaudeCodeSource: TelemetrySource {
             if let s = c as? String, !s.trimmingCharacters(in: .whitespaces).isEmpty {
                 return (.processing, nil, "processing prompt")
             }
+            // Array content = tool_result coming back. Claude is parsing
+            // it AND already drafting the next chunk — we can't separate
+            // the two from the jsonl, so use the neutral "processing"
+            // verb instead of misleadingly sticking on "thinking".
             if c is [Any] {
-                return (.thinking, nil, "parsing tool result")
+                return (.processing, nil, "tool result returned")
             }
-            return (.thinking, nil, "parsing request context")
+            return (.processing, nil, "reading context")
         }
         if ev.type == "assistant" {
             let content = (ev.message["content"] as? [[String: Any]]) ?? []
@@ -420,10 +450,17 @@ final class ClaudeCodeSource: TelemetrySource {
                 if target.count > 48 { target = String(target.prefix(48)) }
                 return (.tool, name, target.isEmpty ? "running" : target)
             }
-            if let last = content.last, (last["type"] as? String) == "thinking" {
+            let age = ev.timestamp > 0
+                ? Date.now.timeIntervalSince1970 - ev.timestamp
+                : .infinity
+            // "thinking" is only meaningful when the message JUST landed.
+            // After a few seconds Claude has almost certainly moved on to
+            // streaming the next chunk, so don't get stuck on the label.
+            if age < 3,
+               let last = content.last, (last["type"] as? String) == "thinking" {
                 return (.thinking, nil, "reasoning")
             }
-            if ev.timestamp > 0, Date.now.timeIntervalSince1970 - ev.timestamp < 3 {
+            if age < 3 {
                 return (.writing, nil, "drafting response")
             }
             return (.idle, nil, "awaiting next directive")

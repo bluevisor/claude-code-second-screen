@@ -8,7 +8,7 @@
 import SwiftUI
 
 @main
-struct TrofeoVisionApp: App {
+struct NeoDashboardApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var env = AppEnvironment()
 
@@ -44,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication,
                                        hasVisibleWindows flag: Bool) -> Bool {
         // Reopen the preview window when the app icon is clicked.
-        if !flag, let url = URL(string: "trofeo-vision://preview") {
+        if !flag, let url = URL(string: "neo-dashboard://preview") {
             NSWorkspace.shared.open(url)
         }
         return true

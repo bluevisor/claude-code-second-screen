@@ -21,6 +21,8 @@ final class MatrixRenderer {
     private var staticBackground: CGImage?
     private let rain: RainPainter
     private let showRain: Bool
+    /// Barrel + chromatic-aberration pass applied as a final post-process.
+    private let crt = CRTPostProcessor()
 
     init(size: CGSize = MatrixTheme.canvasSize,
          showRain: Bool = true,
@@ -83,7 +85,7 @@ final class MatrixRenderer {
 
         drawRail(into: ctx, rect: railRect, tel: tel, now: now)
         drawPanel(ctx, rect: agentRect)
-        drawAgentPanel(into: ctx, rect: agentRect, tel: tel, blink: blink)
+        drawAgentPanel(into: ctx, rect: agentRect, tel: tel, blink: blink, now: now)
         drawPanel(ctx, rect: modelRect)
         drawModelPanel(into: ctx, rect: modelRect, tel: tel)
         drawPanel(ctx, rect: quotaRect)
@@ -92,9 +94,11 @@ final class MatrixRenderer {
         drawSubAgentsPanel(into: ctx, rect: subsRect, tel: tel)
         drawFooter(into: ctx, rect: footerRect, tel: tel, now: now)
 
-        drawScanlines(into: ctx, opacity: 0.55)
+        drawScanlines(into: ctx, opacity: 0.78)
+        drawVignette(into: ctx, strength: 0.42)
 
-        return ctx.makeImage()
+        guard let raw = ctx.makeImage() else { return nil }
+        return crt.process(raw) ?? raw
     }
 
     // MARK: - Background
@@ -116,12 +120,39 @@ final class MatrixRenderer {
 
     private func drawScanlines(into ctx: CGContext, opacity: CGFloat) {
         ctx.saveGState()
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.22 * opacity).cgColor)
+        // Slightly more punch per line (was 0.22) so the strap pattern
+        // reads as a real CRT effect, not a faint hint.
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.30 * opacity).cgColor)
         var y: CGFloat = 0
         while y < size.height {
             ctx.fill(CGRect(x: 0, y: y, width: size.width, height: 1))
             y += 2
         }
+        ctx.restoreGState()
+    }
+
+    /// CRT-style edge vignette — radial gradient from clear at the center
+    /// of the canvas to translucent black at the corners. `strength` is the
+    /// alpha at the outer edge; the inner clear radius scales with the
+    /// shorter canvas axis so the result reads the same on any size.
+    private func drawVignette(into ctx: CGContext, strength: CGFloat) {
+        let centerX = size.width / 2
+        let centerY = size.height / 2
+        let innerRadius = min(size.width, size.height) * 0.32
+        let outerRadius = hypot(centerX, centerY) * 1.05
+        let grad = CGGradient(colorsSpace: colorSpace,
+            colors: [
+                NSColor.black.withAlphaComponent(0).cgColor,
+                NSColor.black.withAlphaComponent(strength).cgColor,
+            ] as CFArray,
+            locations: [0, 1])!
+        ctx.saveGState()
+        ctx.drawRadialGradient(grad,
+            startCenter: CGPoint(x: centerX, y: centerY),
+            startRadius: innerRadius,
+            endCenter: CGPoint(x: centerX, y: centerY),
+            endRadius: outerRadius,
+            options: [])
         ctx.restoreGState()
     }
 
@@ -216,7 +247,7 @@ final class MatrixRenderer {
 
         cx += drawChip(ctx, x: cx, y: chipTop, text: tel.agent.cwd) + 8
         let branchText = tel.agent.gitBranch.isEmpty ? ""
-            : "⎇ \(tel.agent.gitBranch)\(tel.agent.gitDirty ? "●" : "")"
+            : "⎇ \(tel.agent.gitBranch)\(tel.agent.gitDirty ? " ●" : "")"
         if !branchText.isEmpty {
             cx += drawChip(ctx, x: cx, y: chipTop, text: branchText) + 8
         }
@@ -263,12 +294,12 @@ final class MatrixRenderer {
 
     // MARK: - Agent panel
 
-    private func drawAgentPanel(into ctx: CGContext, rect: CGRect, tel: Telemetry, blink: Double) {
+    private func drawAgentPanel(into ctx: CGContext, rect: CGRect, tel: Telemetry, blink: Double, now: Date) {
         var cx = rect.minX + 16
         var cy = rect.minY + 14
 
         // Title.
-        _ = drawText(ctx, "▸ AGENT", font: MatrixTheme.font(12, weight: .bold),
+        _ = drawText(ctx, "▸ PROMPT", font: MatrixTheme.font(12, weight: .bold),
                      color: MatrixTheme.phosphor, position: CGPoint(x: cx, y: cy))
         // Meta right-aligned.
         let dur = Int(Date.now.timeIntervalSince(tel.agent.startedAt))
@@ -289,9 +320,10 @@ final class MatrixRenderer {
         let verbFont = MatrixTheme.font(34, weight: .heavy)
         let verbAdv = drawText(ctx, verb, font: verbFont, color: MatrixTheme.phosphor,
                                position: CGPoint(x: cx, y: cy))
-        // Caret.
-        if tel.agent.status != .idle, tel.agent.status != .waiting,
-           (blink.truncatingRemainder(dividingBy: 1)) < 0.5 {
+        // Caret blink — synced to the footer clock's colon: on during the
+        // same even-second beat so the two animations breathe together.
+        let caretOn = Calendar.current.component(.second, from: now).isMultiple(of: 2)
+        if tel.agent.status != .idle, tel.agent.status != .waiting, caretOn {
             let capH: CGFloat = max(18, capHeight(of: verbFont))
             let topY = cy + verbFont.ascender - capH
             let caret = CGRect(x: cx + verbAdv + 6, y: topY, width: 13, height: capH)
@@ -374,16 +406,20 @@ final class MatrixRenderer {
                      color: MatrixTheme.phosphor, position: CGPoint(x: cx, y: cy))
         cy += 22
 
-        // Modhead (left text + badge box, but no badge image yet — TODO load asset).
-        let badgeSize: CGFloat = 84
-        let badgeX = rect.maxX - 16 - badgeSize
-        let leftW = rect.width - 32 - badgeSize - 14
+        // Modhead (left text + provider badge). Every badge gets the same
+        // visual height; landscape figures (anthropic) end up wider than
+        // square logos (openai), so `leftW` is derived from the actual
+        // rendered width to keep the name from colliding.
+        let badgeH: CGFloat = 84
+        let badgeW = Self.badgeRenderWidth(provider: m.provider, height: badgeH)
+        let badgeX = rect.maxX - 16 - badgeW
+        let leftW = rect.width - 32 - badgeW - 14
 
         let nameFont = MatrixTheme.font(22, weight: .heavy)
         let nameMid = cy + capHeight(of: nameFont) / 2 + (nameFont.ascender - capHeight(of: nameFont))
-        let badgeY = nameMid - badgeSize / 2
+        let badgeY = nameMid - badgeH / 2
 
-        drawModelBadge(ctx, rect: CGRect(x: badgeX, y: badgeY, width: badgeSize, height: badgeSize),
+        drawModelBadge(ctx, rect: CGRect(x: badgeX, y: badgeY, width: badgeW, height: badgeH),
                        provider: m.provider)
 
         let vText = "v\(m.version)"
@@ -407,7 +443,7 @@ final class MatrixRenderer {
         _ = drawText(ctx, elide(sub, font: subFont, maxW: leftW),
                      font: subFont, color: MatrixTheme.inkDim,
                      position: CGPoint(x: cx, y: cy))
-        cy = max(cy + 16, badgeY + badgeSize) + 14
+        cy = max(cy + 16, badgeY + badgeH) + 14
 
         // 2×2 spec grid.
         let specW = (rect.width - 32 - 12) / 2
@@ -471,28 +507,122 @@ final class MatrixRenderer {
         cy += 22
         drawTrack(ctx, rect: CGRect(x: cx, y: cy, width: rect.width - 32, height: 7),
                   pct: ctxPct, color: ctxColor)
+        cy += 7 + 14
+
+        // Latency sparkline — fills whatever remains of the model panel.
+        let graphTop = cy
+        let graphBot = rect.maxY - 12
+        if graphBot - graphTop >= 30 {
+            drawLatencyGraph(into: ctx,
+                             rect: CGRect(x: cx, y: graphTop,
+                                          width: rect.width - 32,
+                                          height: graphBot - graphTop),
+                             history: m.latencyHistory,
+                             lastMs: m.lastRequestMs,
+                             p95ms: m.p95ms)
+        }
+    }
+
+    /// Sparkline of recent assistant-turn round-trip latencies. Y-axis is
+    /// auto-scaled to the largest observed value with a soft minimum so a
+    /// quiet session doesn't render as flat-line noise. P95 is overlaid as
+    /// a dim guideline.
+    private func drawLatencyGraph(into ctx: CGContext, rect: CGRect,
+                                  history: [Double], lastMs: Double, p95ms: Double) {
+        // Header row.
+        let labelFont = MatrixTheme.font(11, weight: .bold)
+        _ = drawText(ctx, "RESPONSE TIME", font: labelFont,
+                     color: MatrixTheme.inkFaint,
+                     position: CGPoint(x: rect.minX, y: rect.minY))
+        let valFont = MatrixTheme.font(11)
+        let valText = history.isEmpty
+            ? "—"
+            : "\(Int(lastMs))MS · P95 \(Int(p95ms))MS"
+        let vw = stringWidth(valText, font: valFont)
+        _ = drawText(ctx, valText, font: valFont, color: MatrixTheme.ink,
+                     position: CGPoint(x: rect.maxX - vw, y: rect.minY))
+
+        // Plot area sits under the header row.
+        let plot = CGRect(x: rect.minX,
+                          y: rect.minY + 18,
+                          width: rect.width,
+                          height: max(0, rect.height - 18))
+        guard plot.height >= 12 else { return }
+
+        // Frame the plot subtly.
+        ctx.setStrokeColor(MatrixTheme.panelBorder.cgColor)
+        ctx.setLineWidth(1)
+        ctx.stroke(plot.insetBy(dx: 0.5, dy: 0.5))
+
+        guard !history.isEmpty else {
+            let hint = "waiting for samples…"
+            _ = drawText(ctx, hint, font: valFont, color: MatrixTheme.inkFaint,
+                         position: CGPoint(x: plot.midX - stringWidth(hint, font: valFont) / 2,
+                                           y: plot.midY - 6))
+            return
+        }
+
+        // Auto-scale y axis. Force a floor so jitter doesn't dominate.
+        let maxV = max(history.max() ?? 1, 1000)
+
+        // P95 guideline.
+        if p95ms > 0, p95ms <= maxV {
+            let py = plot.maxY - CGFloat(p95ms / maxV) * (plot.height - 4) - 2
+            ctx.saveGState()
+            ctx.setStrokeColor(MatrixTheme.amber.withAlphaComponent(0.35).cgColor)
+            ctx.setLineWidth(1)
+            ctx.setLineDash(phase: 0, lengths: [3, 3])
+            ctx.move(to: CGPoint(x: plot.minX + 2, y: py))
+            ctx.addLine(to: CGPoint(x: plot.maxX - 2, y: py))
+            ctx.strokePath()
+            ctx.restoreGState()
+        }
+
+        // Line + dot at the most recent sample.
+        let n = history.count
+        let step = (plot.width - 4) / CGFloat(max(n - 1, 1))
+        let path = CGMutablePath()
+        for (i, v) in history.enumerated() {
+            let x = plot.minX + 2 + CGFloat(i) * step
+            let y = plot.maxY - CGFloat(v / maxV) * (plot.height - 4) - 2
+            i == 0 ? path.move(to: CGPoint(x: x, y: y))
+                   : path.addLine(to: CGPoint(x: x, y: y))
+        }
+        ctx.setStrokeColor(MatrixTheme.phosphor.cgColor)
+        ctx.setLineWidth(1.6)
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        ctx.addPath(path)
+        ctx.strokePath()
+
+        if let last = history.last {
+            let x = plot.maxX - 2
+            let y = plot.maxY - CGFloat(last / maxV) * (plot.height - 4) - 2
+            ctx.setFillColor(MatrixTheme.phosphor.cgColor)
+            ctx.fillEllipse(in: CGRect(x: x - 2.5, y: y - 2.5, width: 5, height: 5))
+        }
     }
 
     private func drawModelBadge(_ ctx: CGContext, rect: CGRect, provider: String) {
-        // The bundled anthropic-figure.png is the same asset as the Python app.
+        // The caller has already sized `rect` to the badge's natural aspect
+        // ratio at the desired height (see `badgeRenderWidth`) — so we just
+        // fill it. Image is in y-down coords like the rest of our painting.
         let resourceName = provider == "anthropic" ? "anthropic-figure" : "openai-logo"
         guard let img = Self.badgeImage(named: resourceName) else { return }
-        // Draw flush with the top of the reserved box, aspect-fit.
-        let aspect = CGFloat(img.width) / CGFloat(img.height)
-        let drawH = min(rect.height, rect.width / aspect)
-        let drawW = drawH * aspect
-        let x = rect.midX - drawW / 2
-        // Center vertically inside the reserved badge rect so the figure
-        // sits next to the cap-mid of the model name rather than floating
-        // above it.
-        let y = rect.midY - drawH / 2
         ctx.saveGState()
-        // Image is in y-down coords like the rest of our painting.
-        ctx.translateBy(x: x, y: y)
+        ctx.translateBy(x: rect.minX, y: rect.minY)
         ctx.scaleBy(x: 1, y: -1)
-        ctx.translateBy(x: 0, y: -drawH)
-        ctx.draw(img, in: CGRect(x: 0, y: 0, width: drawW, height: drawH))
+        ctx.translateBy(x: 0, y: -rect.height)
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: rect.width, height: rect.height))
         ctx.restoreGState()
+    }
+
+    /// Natural pixel width of the provider badge at a given height. Falls
+    /// back to a square if the asset can't be loaded.
+    fileprivate static func badgeRenderWidth(provider: String, height: CGFloat) -> CGFloat {
+        let name = provider == "anthropic" ? "anthropic-figure" : "openai-logo"
+        guard let img = badgeImage(named: name), img.height > 0 else { return height }
+        return height * CGFloat(img.width) / CGFloat(img.height)
     }
 
     // MARK: - Quota panel
@@ -652,12 +782,9 @@ final class MatrixRenderer {
             x += stringWidth(part, font: clockFont)
         }
 
-        // Right stats.
-        let tz = TimeZone.current
-        let offsetSec = tz.secondsFromGMT()
-        let sign = offsetSec >= 0 ? "+" : "-"
-        let absM = abs(offsetSec) / 60
-        let tzText = String(format: "UTC%@%02d:%02d", sign, absM / 60, absM % 60)
+        // Right stats. Weather replaces the legacy UTC-offset chip; until
+        // the first network refresh succeeds we show a placeholder.
+        let weatherText = (WeatherService.shared.summary ?? "—").uppercased()
         var rx = rect.maxX - 16
         let rf = MatrixTheme.font(13)
         if !MatrixTheme.isSubscriptionPlan(q.plan) {
@@ -669,9 +796,9 @@ final class MatrixRenderer {
                          position: CGPoint(x: rx - cw2, y: ly))
             rx -= cw2 + 16
         }
-        let tzW = stringWidth(tzText, font: rf)
-        _ = drawText(ctx, tzText, font: rf, color: MatrixTheme.inkDim,
-                     position: CGPoint(x: rx - tzW, y: ly))
+        let weatherW = stringWidth(weatherText, font: rf)
+        _ = drawText(ctx, weatherText, font: rf, color: MatrixTheme.inkDim,
+                     position: CGPoint(x: rx - weatherW, y: ly))
     }
 
     // MARK: - Generic helpers

@@ -21,11 +21,11 @@ final class MenuBarController: NSObject {
     private func configure() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            let image = NSImage(systemSymbolName: "display", accessibilityDescription: "Trofeo Vision")
+            let image = NSImage(systemSymbolName: "display", accessibilityDescription: "NeoDashboard")
             image?.isTemplate = true
             button.image = image
             button.imagePosition = .imageOnly
-            button.toolTip = "Trofeo Vision"
+            button.toolTip = "NeoDashboard"
             button.target = self
             button.action = #selector(togglePopover(_:))
         }

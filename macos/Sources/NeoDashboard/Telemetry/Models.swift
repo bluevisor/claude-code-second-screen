@@ -65,6 +65,10 @@ struct AgentModel: Sendable {
     var p50ms: Double
     var p95ms: Double
     var lastRequestMs: Double
+    /// Rolling window of recent assistant-turn latencies (oldest→newest, ms).
+    /// Renderers sparkline this; empty when the source hasn't seen enough
+    /// events yet.
+    var latencyHistory: [Double] = []
 }
 
 struct QuotaWindow: Sendable {

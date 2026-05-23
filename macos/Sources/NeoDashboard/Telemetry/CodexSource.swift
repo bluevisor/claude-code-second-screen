@@ -68,7 +68,7 @@ final class CodexSource: TelemetrySource {
         self.label = kind.label
         self.plan = kind.plan
         self.sessionsDirs = sessionsDirs ?? Self.defaultSessionsDirs(for: kind)
-        self.logger = Logger(subsystem: "tech.bluevisor.TrofeoVision",
+        self.logger = Logger(subsystem: "tech.bluevisor.NeoDashboard",
                              category: kind.label)
     }
 

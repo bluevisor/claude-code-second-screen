@@ -729,10 +729,15 @@ final class AnimalCrossingRenderer: FrameRenderer {
 
     // MARK: - Text primitives
 
+    /// Mirrors `MatrixTheme.fontScale` — one knob to nudge every glyph in
+    /// the Cozy dashboard at once.
+    private static let fontScale: CGFloat = 1.10
+
     private func roundedFont(_ size: CGFloat, weight: NSFont.Weight) -> NSFont {
-        let base = NSFont.systemFont(ofSize: size, weight: weight)
+        let scaled = (size * Self.fontScale).rounded()
+        let base = NSFont.systemFont(ofSize: scaled, weight: weight)
         guard let d = base.fontDescriptor.withDesign(.rounded) else { return base }
-        return NSFont(descriptor: d, size: size) ?? base
+        return NSFont(descriptor: d, size: scaled) ?? base
     }
 
     /// Draw text where `(x, y)` is the top-left of the cap-box.
