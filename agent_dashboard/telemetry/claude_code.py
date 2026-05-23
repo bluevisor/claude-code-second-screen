@@ -127,7 +127,7 @@ class ClaudeCodeSource:
         tel = src.tick()  # call periodically; returns latest Telemetry
     """
 
-    def __init__(self) -> None:
+    def __init__(self, plan: str = "MAX 20×") -> None:
         self._jsonl: Path | None = None
         self._offset = 0
         self._events: list[dict[str, Any]] = []
@@ -139,6 +139,7 @@ class ClaudeCodeSource:
         self._last_status: str = "idle"
         self._status_started: float = time.time()
         self._scanned_other_sessions = False
+        self._plan = plan
 
     # ── public API ───────────────────────────────────────────────────────
 
@@ -419,7 +420,7 @@ class ClaudeCodeSource:
         cap_5h = max(2_500_000, _ceil_nice(used_5h * 1.3))
         cap_7d = max(35_000_000, _ceil_nice(used_7d * 1.3))
         quota = Quota(
-            plan="MAX 20×",
+            plan=self._plan,
             pricing_in_per_mtok=pin,
             pricing_out_per_mtok=pout,
             windows=[

@@ -222,7 +222,7 @@ def _is_write_call(name: str, args: dict[str, Any]) -> bool:
 class CodexSource:
     """Live source that tails the newest Codex rollout jsonl."""
 
-    def __init__(self) -> None:
+    def __init__(self, plan: str = "API USAGE") -> None:
         self._jsonl: Path | None = None
         self._offset = 0
         self._events: list[dict[str, Any]] = []
@@ -231,6 +231,7 @@ class CodexSource:
         self._last_status = "idle"
         self._status_started = time.time()
         self._scanned_other_sessions = False
+        self._plan = plan
 
     def tick(self) -> Telemetry:
         self._refresh_active_file()
@@ -460,7 +461,7 @@ class CodexSource:
             last_request_ms=last_ms,
         )
         quota = Quota(
-            plan="API USAGE",
+            plan=self._plan,
             pricing_in_per_mtok=pin,
             pricing_out_per_mtok=pout,
             windows=[

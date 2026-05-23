@@ -55,6 +55,7 @@ def run(
     show_rain: bool = True,
     rain_fps: int = 12,
     stats: bool = False,
+    plan: str | None = None,
 ) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -64,10 +65,10 @@ def run(
     sim: DemoSimulator | None = None
     live: ClaudeCodeSource | CodexSource | None = None
     if source == "claude-code":
-        live = ClaudeCodeSource()
+        live = ClaudeCodeSource(plan=plan or "MAX 20×")
         initial = live.tick()
     elif source == "codex":
-        live = CodexSource()
+        live = CodexSource(plan=plan or "API USAGE")
         initial = live.tick()
     else:
         sim = DemoSimulator(agent_kind=demo_agent, model_key=demo_model)

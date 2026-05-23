@@ -146,6 +146,11 @@ def pct_class_color(headroom_pct: float) -> QColor:
     return PHOSPHOR
 
 
+def is_subscription_plan(plan: str) -> bool:
+    """Subscription plans charge a flat fee — per-window dollar tallies are noise."""
+    return (plan or "").upper().startswith(("MAX", "PRO", "FREE", "TEAM"))
+
+
 class MatrixThemeWidget(QWidget):
     def __init__(
         self,
@@ -376,36 +381,46 @@ class MatrixThemeWidget(QWidget):
     def _draw_rail(self, p: QPainter, r: QRect) -> None:
         a = self.tel.agent
         cx = r.left()
-        # Rail vertical center — matches the chip mid so the LED dot and
-        # rail text sit on the same line.
-        rail_mid = r.top() + 6 + 22 // 2
+        # Chips are 22 px tall and start at r.top()+6 — their geometric mid is
+        # the row's vertical anchor. We align the LED dot and the text cap-mid
+        # to this line so dot, label, chips, and session id all read as one row.
+        chip_top = r.top() + 6
+        chip_h = 22
+        row_mid = chip_top + chip_h // 2
 
-        # LED — small 10px dot, faint 18px halo behind it, both centered on rail_mid.
+        # text baseline math — we want the cap-mid of the agent label and
+        # session text to land on row_mid. y_text = row_mid - capHeight/2 - (ascent - capHeight)
+        label_f = font(13, QFont.Bold)
+        sess_f = font(11, QFont.Normal)
+        def _cap_top_y(f_: QFont) -> int:
+            fm_ = QFontMetrics(f_)
+            return int(row_mid - fm_.capHeight() / 2 - (fm_.ascent() - fm_.capHeight()))
+
+        label_y = _cap_top_y(label_f)
+        sess_y = _cap_top_y(sess_f)
+
+        # LED — small 10px dot, faint 18px halo behind it, both centered on row_mid.
         led_color = MAGENTA if a.status == "error" else (AMBER if a.status == "idle" else PHOSPHOR)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(led_color.red(), led_color.green(), led_color.blue(), 90))
-        p.drawEllipse(QRectF(cx - 4, rail_mid - 9, 18, 18))
+        p.drawEllipse(QRectF(cx - 4, row_mid - 9, 18, 18))
         p.setBrush(led_color)
-        p.drawEllipse(QRectF(cx, rail_mid - 5, 10, 10))
+        p.drawEllipse(QRectF(cx, row_mid - 5, 10, 10))
         cx += 22
 
-        # agent label (bold, 14px)
-        f = font(13, QFont.Bold)
-        from .matrix import AGENT_LABEL_MAP as _  # noqa: F401 — placeholder to silence
-
+        # agent label (bold, 13px)
         agent_label = (a.kind or "agent").upper().replace("-", " ")
-        adv = self._text(p, cx, r.top() + 9, agent_label, f, INK)
+        adv = self._text(p, cx, label_y, agent_label, label_f, INK)
         cx += adv + 12
 
         # chip: cwd
-        cx += self._draw_chip(p, cx, r.top() + 6, a.cwd) + 8
+        cx += self._draw_chip(p, cx, chip_top, a.cwd) + 8
         # chip: branch
         branch_text = f"⎇ {a.git_branch}" + ("●" if a.git_dirty else "")
-        cx += self._draw_chip(p, cx, r.top() + 6, branch_text) + 8
+        cx += self._draw_chip(p, cx, chip_top, branch_text) + 8
         # session id
         sess = f"SESS {a.session_id}"
-        ff = font(11, QFont.Normal)
-        cx += self._text(p, cx, r.top() + 9, sess, ff, INK_FAINT) + 12
+        cx += self._text(p, cx, sess_y, sess, sess_f, INK_FAINT) + 12
 
         # right side: weekday + date (replaces the old LIVE pulse + chip).
         now = datetime.now()
@@ -413,7 +428,7 @@ class MatrixThemeWidget(QWidget):
         date_f = font(12, QFont.Bold)
         date_w = QFontMetrics(date_f).horizontalAdvance(date_text)
         date_x = r.right() - date_w
-        self._text(p, date_x, r.top() + 9, date_text, date_f, INK_DIM)
+        self._text(p, date_x, _cap_top_y(date_f), date_text, date_f, INK_DIM)
 
         # separator — gradient line between left cluster and date
         sep_left = cx + 4
@@ -425,7 +440,7 @@ class MatrixThemeWidget(QWidget):
             sep_grad.setColorAt(1.0, QColor(41, 255, 140, 0))
             p.setPen(Qt.NoPen)
             p.setBrush(sep_grad)
-            p.drawRect(QRectF(sep_left, r.top() + 17, sep_right - sep_left, 1))
+            p.drawRect(QRectF(sep_left, row_mid, sep_right - sep_left, 1))
 
     def _chip_width(self, text: str, font_: QFont | None = None) -> int:
         f = font_ or font(11, QFont.Normal)
@@ -554,7 +569,7 @@ class MatrixThemeWidget(QWidget):
 
         # title (redundant "claude-opus-4-7" id removed — the big CLAUDE OPUS
         # name + v-pill below already covers it).
-        self._text(p, cx, cy, "▸ MODEL  ·  ACTIVE", font(12, QFont.Bold), PHOSPHOR)
+        self._text(p, cx, cy, "▸ MODEL", font(12, QFont.Bold), PHOSPHOR)
 
         cy += 22
 
@@ -590,9 +605,13 @@ class MatrixThemeWidget(QWidget):
         # advance past badge bottom
         cy = max(cy + 16, badge_y + badge_size) + 14
 
-        # specs grid 2×2
+        # specs grid 2×2 — taller cells with more padding so the 16pt value
+        # never crowds the bottom border, and value+unit can't reach the
+        # right edge.
         spec_w = (r.width() - 32 - 12) // 2
-        spec_h = 42
+        spec_h = 50
+        pad_l = 10
+        pad_r = 10
         ctx_max_str = (
             f"{m.context_max/1_000_000:.0f}M" if m.context_max >= 1_000_000
             else f"{int(m.context_max/1000)}K"
@@ -603,22 +622,32 @@ class MatrixThemeWidget(QWidget):
             ("CACHE READ", f"{m.cache_read_tokens/1e6:.2f}M", "tok"),
             ("CACHE HIT", f"{(m.cache_read_tokens / max(m.cache_read_tokens + m.input_tokens, 1)) * 100:.1f}", "%"),
         ]
+        vf = font(16, QFont.Bold)
+        uf = font(11)
+        lf = font(10, QFont.Bold)
         for i, (k, v, u) in enumerate(specs):
             col = i % 2
             row = i // 2
             sx = cx + col * (spec_w + 12)
-            sy = cy + row * (spec_h + 7)
+            sy = cy + row * (spec_h + 8)
             # background + border
             p.setPen(QPen(PANEL_BORDER, 1))
             p.setBrush(QColor(2, 16, 12, int(255 * 0.45)))
             p.drawRect(sx, sy, spec_w, spec_h)
-            self._text(p, sx + 9, sy + 7, k, font(10, QFont.Bold), INK_FAINT)
-            vf = font(16, QFont.Bold)
-            uf = font(11)
-            vw = self._text(p, sx + 9, sy + 22, v, vf, INK)
+            # Label clipped to inner width so a long key never collides with
+            # the right border.
+            label = self._elide(k, lf, spec_w - pad_l - pad_r)
+            self._text(p, sx + pad_l, sy + 9, label, lf, INK_FAINT)
+            # Value + unit composed within the inner width, eliding value if
+            # needed so the unit always sits inside the cell.
+            inner_w = spec_w - pad_l - pad_r
+            ufm = QFontMetrics(uf)
+            u_w = ufm.horizontalAdvance(u) + 3 if u else 0
+            v_disp = self._elide(v, vf, inner_w - u_w)
+            vw = self._text(p, sx + pad_l, sy + 26, v_disp, vf, INK)
             if u:
-                self._text(p, sx + 9 + vw + 3, sy + 27, u, uf, INK_DIM)
-        cy += 2 * (spec_h + 7) + 4
+                self._text(p, sx + pad_l + vw + 3, sy + 31, u, uf, INK_DIM)
+        cy += 2 * (spec_h + 8) + 4
 
         # context bar
         cy += 6  # breathing room below the spec grid
@@ -706,6 +735,7 @@ class MatrixThemeWidget(QWidget):
         cy += 24
 
         # quota windows
+        show_cost = not is_subscription_plan(q.plan)
         for w in q.windows:
             pct = max(0.0, min(100.0, (w.used / max(w.cap, 1)) * 100))
             color = pct_class_color(100 - pct)
@@ -721,30 +751,30 @@ class MatrixThemeWidget(QWidget):
             cy += 22
             self._draw_track(p, QRectF(cx, cy, r.width() - 32, 7), pct, color)
             cy += 13
-            # foot: resets + cost
+            # foot: resets (+ cost only on per-token API billing)
             self._text(p, cx, cy, f"resets {fmt_dur(w.reset_in_sec)}", font(10), INK_FAINT)
-            cost_text = f"${w.cost_usd:.2f} spent"
-            cfm = QFontMetrics(font(10))
-            self._text(p, r.right() - 16 - cfm.horizontalAdvance(cost_text), cy, cost_text, font(10), INK_FAINT)
+            if show_cost:
+                cost_text = f"${w.cost_usd:.2f} spent"
+                cfm = QFontMetrics(font(10))
+                self._text(p, r.right() - 16 - cfm.horizontalAdvance(cost_text), cy, cost_text, font(10), INK_FAINT)
             cy += 16
 
-        # ── sub-agents section ───────────────────────────────────────────
-        cy += 4
-        pen = QPen(QColor(41, 255, 140, int(255 * 0.18)), 1, Qt.DashLine)
-        p.setPen(pen)
-        p.drawLine(cx, cy, r.right() - 16, cy)
-        cy += 6
+    # ── sub-agents panel (right column, bottom) ──────────────────────────
+
+    def _draw_subagents_panel(self, p: QPainter, r: QRect) -> None:
+        self._draw_panel(p, r)
+        cx = r.left() + 16
+        cy = r.top() + 14
 
         subs = self.tel.agent.sub_agents
         running_n = sum(1 for s in subs if s.status == "running")
-        header = "▸ SUB-AGENTS"
-        self._text(p, cx, cy, header, font(11, QFont.Bold), PHOSPHOR)
+        self._text(p, cx, cy, "▸ SUB-AGENTS", font(12, QFont.Bold), PHOSPHOR)
         if subs:
             count_text = f"{running_n} live · {len(subs)} recent"
             cfm = QFontMetrics(font(10))
             self._text(p, r.right() - 16 - cfm.horizontalAdvance(count_text), cy + 2,
                        count_text, font(10), INK_FAINT)
-        cy += 18
+        cy += 22
 
         if not subs:
             self._text(p, cx, cy, "(none in this session)", font(11), INK_DIM)
@@ -805,11 +835,16 @@ class MatrixThemeWidget(QWidget):
         s_w = cfm.horizontalAdvance(ss)
         total = h_w + c_w + m_w + c2_w + s_w
         x = r.center().x() - total // 2
-        # Centre the clock vertically inside the footer — equalise top/bottom
-        # spacing by aligning its cap-mid to the footer's geometric mid.
-        cap_top_offset = cfm.ascent() - cfm.capHeight()
-        y = r.center().y() - (cfm.capHeight() / 2) - cap_top_offset
-        y = int(y)
+        # Centre the clock vertically inside the footer using the *tight*
+        # bounding box of the rendered glyphs (ascent/capHeight overestimate
+        # the visual top because ExtraBold has overshoot above cap).
+        tight = cfm.tightBoundingRect("0123456789:")
+        # tight.top() is negative — distance from baseline up to glyph top.
+        glyph_h = tight.height()
+        # we want the glyph center to land on the footer's geometric mid.
+        # baseline = footer_mid - (top + height/2) where top is negative.
+        baseline_y = r.center().y() - (tight.top() + glyph_h / 2)
+        y = int(baseline_y - cfm.ascent())
         draw_glow_text(p, x, y, hh, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4); x += h_w
         draw_glow_text(p, x, y, col_blink, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4); x += c_w
         draw_glow_text(p, x, y, mm, clock_f, INK, PHOSPHOR_SOFT, glow_alpha=60, glow_radius=4); x += m_w
@@ -829,8 +864,7 @@ class MatrixThemeWidget(QWidget):
         rx = r.right() - 16
         # 5H cost — only meaningful on per-token API billing. Subscription
         # plans (Max/Pro) charge a flat fee, so the dollar tally is noise.
-        is_subscription = q.plan.upper().startswith(("MAX", "PRO", "FREE", "TEAM"))
-        if not is_subscription:
+        if not is_subscription_plan(q.plan):
             cost = q.windows[0].cost_usd if q.windows else 0.0
             cost_text = f"5H  ${cost:.2f}"
             cw = rfm.horizontalAdvance(cost_text)
@@ -875,18 +909,21 @@ class MatrixThemeWidget(QWidget):
         col_m_w = frame_w - col_l_w - col_r_w - 2 * gap
         agent_rect = QRect(main_rect.left(), main_rect.top(), col_l_w, main_rect.height())
         model_rect = QRect(main_rect.left() + col_l_w + gap, main_rect.top(), col_m_w, main_rect.height())
-        quota_rect = QRect(main_rect.right() - col_r_w + 1, main_rect.top(), col_r_w, main_rect.height())
+        # Right column stacks QUOTA on top of SUB-AGENTS — fixed quota height
+        # sized to the two windows; sub-agents take the rest.
+        right_x = main_rect.right() - col_r_w + 1
+        quota_h = 158
+        v_gap = 8
+        quota_rect = QRect(right_x, main_rect.top(), col_r_w, quota_h)
+        subs_rect = QRect(right_x, main_rect.top() + quota_h + v_gap, col_r_w,
+                          main_rect.height() - quota_h - v_gap)
 
         self._draw_agent_panel(p, agent_rect)
         self._draw_model_panel(p, model_rect)
         self._draw_quota_panel(p, quota_rect)
+        self._draw_subagents_panel(p, subs_rect)
 
         self._draw_footer(p, footer_rect)
 
         # scanlines on top
         self._draw_scanlines(p, opacity=0.55)
-
-
-# placeholder map referenced above (kept so the import doesn't fail if we
-# later split agent label resolution out)
-AGENT_LABEL_MAP: dict[str, str] = {}

@@ -66,6 +66,9 @@ def main() -> int:
     p.add_argument("--no-rain", action="store_true", help="disable matrix rain for more render headroom")
     p.add_argument("--rain-fps", type=int, default=12, help="max matrix rain update rate (default 12)")
     p.add_argument("--stats", action="store_true", help="log measured render/JPEG/send timings")
+    p.add_argument("--plan", default=None,
+                   help="quota plan label (e.g. 'MAX 5×', 'MAX 20×', 'PRO', 'API USAGE'). "
+                        "Default: 'MAX 20×' for claude-code, 'API USAGE' for codex.")
     args = p.parse_args()
     source = _resolve_source(args.source)
     from .app import run
@@ -82,6 +85,7 @@ def main() -> int:
         show_rain=not args.no_rain,
         rain_fps=args.rain_fps,
         stats=args.stats,
+        plan=args.plan,
     )
 
 
