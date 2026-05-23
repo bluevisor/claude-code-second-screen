@@ -13,18 +13,9 @@ struct TrofeoVisionApp: App {
     @StateObject private var env = AppEnvironment()
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuBarContent()
-                .environmentObject(env)
-                .frame(width: 320)
-        } label: {
-            // Plain SF Symbol — palette/.foregroundStyle on a MenuBarExtra
-            // label silently renders blank on some setups. The agent-status
-            // color lives inside the popover instead.
-            Image(systemName: "display")
-        }
-        .menuBarExtraStyle(.window)
-
+        // Live preview is shown via Window scene; the menu bar item is
+        // managed by AppKit (NSStatusItem) in `MenuBarController` so it
+        // stays visible even when the menu bar overflows behind a notch.
         Window("Live Preview", id: "preview") {
             PreviewWindow()
                 .environmentObject(env)
@@ -39,19 +30,24 @@ struct TrofeoVisionApp: App {
                 .frame(width: 420)
         }
     }
-
-    init() {
-        // Start the render + telemetry loop the moment AppKit comes up so
-        // the LCD pipeline runs even before the user opens the popover.
-        // `@StateObject` isn't initialized at App.init time, but the
-        // delegate's applicationDidFinishLaunching runs after StateObject
-        // wires up — we hop through `AppEnvironment.shared` there.
-        AppEnvironment.installSharedInstance()
-    }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var menuBar: MenuBarController?
+
     func applicationDidFinishLaunching(_ note: Notification) {
-        AppEnvironment.shared?.start()
+        guard let env = AppEnvironment.shared else { return }
+        menuBar = MenuBarController(env: env)
+        env.start()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication,
+                                       hasVisibleWindows flag: Bool) -> Bool {
+        // Reopen the preview window when the app icon is clicked.
+        if !flag, let url = URL(string: "trofeo-vision://preview") {
+            NSWorkspace.shared.open(url)
+        }
+        return true
     }
 }

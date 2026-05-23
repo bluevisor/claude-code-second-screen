@@ -476,19 +476,7 @@ final class MatrixRenderer {
     private func drawModelBadge(_ ctx: CGContext, rect: CGRect, provider: String) {
         // The bundled anthropic-figure.png is the same asset as the Python app.
         let resourceName = provider == "anthropic" ? "anthropic-figure" : "openai-logo"
-        let dirs = [
-            Bundle.main.resourceURL?.appendingPathComponent("icons"),
-            Bundle.main.resourceURL,
-        ].compactMap { $0 }
-        var image: CGImage?
-        for dir in dirs {
-            let url = dir.appendingPathComponent("\(resourceName).png")
-            if let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-               let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) {
-                image = cg; break
-            }
-        }
-        guard let img = image else { return }
+        guard let img = Self.badgeImage(named: resourceName) else { return }
         // Draw flush with the top of the reserved box, aspect-fit.
         let aspect = CGFloat(img.width) / CGFloat(img.height)
         let drawH = min(rect.height, rect.width / aspect)
@@ -810,5 +798,36 @@ final class MatrixRenderer {
         if headroom < 10 { return MatrixTheme.magenta }
         if headroom < 25 { return MatrixTheme.amber }
         return MatrixTheme.phosphor
+    }
+
+    // MARK: - Image cache
+
+    /// One-time-loaded CGImages keyed by base name. Bundle resources are
+    /// flat (Contents/Resources/<name>.png) — we probe both layouts but
+    /// check existence first so missing files never spam the IIO error log.
+    // NSCache is documented thread-safe per the cocoa headers; the warning
+    // exists only because the type isn't formally `Sendable`.
+    private nonisolated(unsafe) static let imageCache: NSCache<NSString, CGImage> = {
+        let c = NSCache<NSString, CGImage>()
+        c.countLimit = 16
+        return c
+    }()
+
+    private static func badgeImage(named name: String) -> CGImage? {
+        if let cached = imageCache.object(forKey: name as NSString) { return cached }
+        let fm = FileManager.default
+        let candidates: [URL] = [
+            Bundle.main.resourceURL?.appendingPathComponent("\(name).png"),
+            Bundle.main.resourceURL?
+                .appendingPathComponent("icons")
+                .appendingPathComponent("\(name).png"),
+        ].compactMap { $0 }
+        for url in candidates where fm.fileExists(atPath: url.path) {
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { continue }
+            imageCache.setObject(img, forKey: name as NSString)
+            return img
+        }
+        return nil
     }
 }
