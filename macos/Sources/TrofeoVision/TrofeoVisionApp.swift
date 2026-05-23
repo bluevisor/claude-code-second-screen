@@ -9,6 +9,7 @@ import SwiftUI
 
 @main
 struct TrofeoVisionApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var env = AppEnvironment()
 
     var body: some Scene {
@@ -17,8 +18,10 @@ struct TrofeoVisionApp: App {
                 .environmentObject(env)
                 .frame(width: 320)
         } label: {
-            MenuBarLabel()
-                .environmentObject(env)
+            // Plain SF Symbol — palette/.foregroundStyle on a MenuBarExtra
+            // label silently renders blank on some setups. The agent-status
+            // color lives inside the popover instead.
+            Image(systemName: "display")
         }
         .menuBarExtraStyle(.window)
 
@@ -38,28 +41,17 @@ struct TrofeoVisionApp: App {
     }
 
     init() {
-        // StateObject hasn't run yet; defer start to .onAppear.
+        // Start the render + telemetry loop the moment AppKit comes up so
+        // the LCD pipeline runs even before the user opens the popover.
+        // `@StateObject` isn't initialized at App.init time, but the
+        // delegate's applicationDidFinishLaunching runs after StateObject
+        // wires up — we hop through `AppEnvironment.shared` there.
+        AppEnvironment.installSharedInstance()
     }
 }
 
-struct MenuBarLabel: View {
-    @EnvironmentObject private var env: AppEnvironment
-
-    var body: some View {
-        // Color the SF Symbol by agent status (matches the rail LED).
-        Image(systemName: "rectangle.connected.to.line.below")
-            .symbolRenderingMode(.palette)
-            .foregroundStyle(statusColor, .secondary)
-            .onAppear {
-                env.start()
-            }
-    }
-
-    private var statusColor: Color {
-        switch env.telemetry.agent.status {
-        case .error: return .red
-        case .idle:  return .orange
-        default:     return .green
-        }
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ note: Notification) {
+        AppEnvironment.shared?.start()
     }
 }

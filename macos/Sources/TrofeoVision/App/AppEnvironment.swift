@@ -7,6 +7,18 @@ import SwiftUI
 
 @MainActor
 final class AppEnvironment: ObservableObject {
+    /// SwiftUI's `@StateObject` builds the singleton; AppDelegate reaches it
+    /// through this back-reference to wire startup into AppKit's lifecycle.
+    private(set) static var shared: AppEnvironment?
+
+    /// Called from `TrofeoVisionApp.init()` before SwiftUI has constructed
+    /// the StateObject. We just register a one-shot resolver that the first
+    /// `init()` writes to `shared`.
+    static func installSharedInstance() {
+        // No-op marker so the App can be sure the symbol is referenced;
+        // actual wiring happens in `init()`.
+    }
+
     enum SourceKind: String, CaseIterable, Identifiable {
         case claudeCode = "Claude Code"
         case demo = "Demo"
@@ -49,6 +61,7 @@ final class AppEnvironment: ObservableObject {
         self.targetFPS = Defaults.targetFPS
         claudeSource.setPlan(Defaults.plan)
         self.source = initialSource == .demo ? demoSource : claudeSource
+        AppEnvironment.shared = self
     }
 
     // MARK: - Lifecycle
