@@ -29,13 +29,16 @@ final class MenuBarController: NSObject {
             button.target = self
             button.action = #selector(togglePopover(_:))
         }
-        let host = NSHostingController(rootView: MenuBarContent().environmentObject(env))
+        let host = NSHostingController(
+            rootView: MenuBarContent()
+                .environmentObject(env)
+                .frame(width: 320)
+        )
+        host.sizingOptions = [.preferredContentSize, .intrinsicContentSize]
         let p = NSPopover()
         p.contentViewController = host
         p.behavior = .transient
         p.animates = true
-        host.view.frame = NSRect(x: 0, y: 0, width: 320, height: 1)
-        host.preferredContentSize = NSSize(width: 320, height: 1)
         self.popover = p
     }
 

@@ -24,7 +24,9 @@ final class ClaudeCodeSource: TelemetrySource {
                                 category: "ClaudeCode")
     private var plan: String
 
+    private let sessionsDir: URL
     private var jsonl: URL?
+    private var pinned: URL?            // user-pinned session, overrides auto
     private var offset: UInt64 = 0
     private var events: [Event] = []
     private var latencies: [Double] = []
@@ -33,15 +35,15 @@ final class ClaudeCodeSource: TelemetrySource {
     private var statusStarted: Date = .now
     private var scannedOtherSessions = false
 
-    init(plan: String = "MAX 20×",
-         projectsDir: URL? = nil) {
-        self.plan = plan
+    init(projectsDir: URL? = nil, sessionsDir: URL? = nil) {
+        self.plan = ClaudePlan.detect()
         self.projectsDir = projectsDir
             ?? URL(fileURLWithPath: NSString("~/.claude/projects").expandingTildeInPath,
                    isDirectory: true)
+        self.sessionsDir = sessionsDir
+            ?? URL(fileURLWithPath: NSString("~/.claude/sessions").expandingTildeInPath,
+                   isDirectory: true)
     }
-
-    func setPlan(_ plan: String) { self.plan = plan }
 
     func tick() -> Telemetry {
         refreshActiveFile()
@@ -53,17 +55,71 @@ final class ClaudeCodeSource: TelemetrySource {
         return buildTelemetry()
     }
 
+    /// Pin the source to a specific session jsonl. Passing nil reverts to
+    /// the busy-or-most-recent auto pick. Resets internal buffers so the
+    /// next tick starts fresh on the new file.
+    func setPinned(_ url: URL?) {
+        if pinned == url { return }
+        pinned = url
+        // Force a reload on next refresh.
+        jsonl = nil
+        offset = 0
+        events.removeAll(keepingCapacity: true)
+        latencies.removeAll(keepingCapacity: true)
+    }
+
     // MARK: - File discovery + tailing
 
     private func refreshActiveFile() {
-        guard let newest = newestJSONL(under: projectsDir) else { return }
-        if newest != jsonl {
-            logger.info("active session: \(newest.path, privacy: .public)")
-            jsonl = newest
+        // If the user pinned a specific session, follow it exclusively.
+        // Otherwise pick the busiest interactive session from the registry,
+        // falling back to the newest-mtime jsonl when registry is empty.
+        let pick: URL?
+        if let p = pinned, FileManager.default.fileExists(atPath: p.path) {
+            pick = p
+        } else {
+            pick = activeSessionJSONL() ?? newestJSONL(under: projectsDir)
+        }
+        guard let next = pick else { return }
+        if next != jsonl {
+            logger.info("active session: \(next.path, privacy: .public)")
+            jsonl = next
             offset = 0
             events.removeAll(keepingCapacity: true)
             latencies.removeAll(keepingCapacity: true)
         }
+    }
+
+    private func activeSessionJSONL() -> URL? {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: sessionsDir,
+                                                      includingPropertiesForKeys: nil,
+                                                      options: [.skipsHiddenFiles]) else { return nil }
+        struct Cand { let url: URL; let busy: Bool; let updatedAt: Double }
+        var cands: [Cand] = []
+        for url in items where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let any = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            guard (any["kind"] as? String) == "interactive",
+                  let sessionId = any["sessionId"] as? String,
+                  let cwd = any["cwd"] as? String else { continue }
+            let updatedAt = (any["updatedAt"] as? Double)
+                ?? Double((any["updatedAt"] as? Int) ?? 0)
+            let busy = (any["status"] as? String) == "busy"
+            let dirName = cwd.replacingOccurrences(of: "/", with: "-")
+            let jsonl = projectsDir
+                .appendingPathComponent(dirName, isDirectory: true)
+                .appendingPathComponent("\(sessionId).jsonl")
+            if fm.fileExists(atPath: jsonl.path) {
+                cands.append(Cand(url: jsonl, busy: busy, updatedAt: updatedAt))
+            }
+        }
+        guard !cands.isEmpty else { return nil }
+        cands.sort {
+            if $0.busy != $1.busy { return $0.busy }
+            return $0.updatedAt > $1.updatedAt
+        }
+        return cands.first?.url
     }
 
     private func tailNewLines() {

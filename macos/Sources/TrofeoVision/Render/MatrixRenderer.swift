@@ -482,7 +482,10 @@ final class MatrixRenderer {
         let drawH = min(rect.height, rect.width / aspect)
         let drawW = drawH * aspect
         let x = rect.midX - drawW / 2
-        let y = rect.minY
+        // Center vertically inside the reserved badge rect so the figure
+        // sits next to the cap-mid of the model name rather than floating
+        // above it.
+        let y = rect.midY - drawH / 2
         ctx.saveGState()
         // Image is in y-down coords like the rest of our painting.
         ctx.translateBy(x: x, y: y)
@@ -634,14 +637,15 @@ final class MatrixRenderer {
         let sw = stringWidth(ss, font: clockFont)
         let total = hw + cw + mw + cw + sw
         var x = rect.midX - total / 2
-        // Center glyphs by their tight bounding box — CTLine gives us the
-        // actual rendered bounds (matches `tightBoundingRect` in matrix.py).
+        // Center glyphs by their tight bounding box. CT uses a baseline-origin
+        // y-up rect: origin.y is the distance from baseline to the bottom of
+        // the inked box (≥ 0 for ASCII digits). In our flipped y-down canvas
+        // the baseline therefore sits *below* the visual center by that span.
         let glyphSample = NSAttributedString(string: "0123456789:",
                                              attributes: [.font: clockFont])
         let glyphLine = CTLineCreateWithAttributedString(glyphSample)
         let tight = CTLineGetBoundsWithOptions(glyphLine, .useOpticalBounds)
-        // tight.origin.y is negative (below baseline); height is the glyph span.
-        let baselineY = rect.midY - (tight.origin.y + tight.height / 2)
+        let baselineY = rect.midY + (tight.origin.y + tight.height / 2)
         for part in [hh, colon, mm, colon, ss] {
             _ = drawText(ctx, part, font: clockFont, color: MatrixTheme.ink,
                          position: CGPoint(x: x, y: baselineY - clockFont.ascender))

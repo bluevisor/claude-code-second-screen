@@ -66,3 +66,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: tech.bluevisor.TrofeoVision
         COMBINE_HIDPI_IMAGES: YES
         ENABLE_PREVIEWS: YES
+schemes:
+  TrofeoVision:
+    build:
+      targets:
+        TrofeoVision: all
+    run:
+      config: Debug

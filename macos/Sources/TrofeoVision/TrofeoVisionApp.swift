@@ -23,12 +23,6 @@ struct TrofeoVisionApp: App {
                        minHeight: 240, idealHeight: 480)
         }
         .commandsRemoved()
-
-        Settings {
-            SettingsView()
-                .environmentObject(env)
-                .frame(width: 420)
-        }
     }
 }
 
@@ -40,6 +34,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let env = AppEnvironment.shared else { return }
         menuBar = MenuBarController(env: env)
         env.start()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        // Menu-bar app — closing the preview window must not quit us.
+        false
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication,

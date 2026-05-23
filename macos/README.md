@@ -10,7 +10,7 @@ project at the repo root.
   homebrew dependencies). Implements the TRCC Type 2 protocol — handshake,
   resolution probe, JPEG frame push over 512-byte HID output reports.
 - Optional desktop preview window mirrors what's pushed to the LCD.
-- Settings: source (Claude Code / Demo), plan label, target FPS,
+- Settings: source (Auto / Claude Code / Codex / AGY / Demo), plan label, target FPS,
   matrix rain toggle, push-to-LCD toggle.
 
 ## Build & run
@@ -55,7 +55,10 @@ macos/
     ├── Telemetry/
     │   ├── Models.swift              # Agent, Model, Quota, …
     │   ├── TelemetrySource.swift     # protocol
+    │   ├── AutoTelemetrySource.swift # follows active Claude / Codex / AGY
     │   ├── ClaudeCodeSource.swift    # tails ~/.claude/projects/**/*.jsonl
+    │   ├── CodexSource.swift         # tails Codex-format rollout jsonl
+    │   ├── SessionDiscovery.swift    # menu-bar active source list
     │   └── DemoSource.swift          # for previews + screenshots
     ├── Render/
     │   ├── MatrixTheme.swift         # palette, font registration
@@ -107,8 +110,9 @@ sleep mirrors `DELAY_FRAME_TYPE2_S` from the C# decompilation.
 
 ## What's intentionally left for follow-ups
 
-- **Codex / agy sources** — only Claude Code is wired up today. The
-  `TelemetrySource` protocol is built for plug-in extension.
+- **AGY-native metadata** — AGY is wired through Codex-format rollout logs
+  (`~/.agy/sessions` or AGY-originated rollouts under `~/.codex/sessions`).
+  If AGY grows a richer registry, source discovery should read that directly.
 - **Pixel-level visual parity with matrix.py** — the panel layout, fonts,
   palette, and verb logic match; subtle FX (glow blur on the status verb,
   scanlines fade vignette, animated bar scan highlight) need finer polish.

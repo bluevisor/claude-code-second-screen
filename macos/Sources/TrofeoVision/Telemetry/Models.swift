@@ -87,6 +87,10 @@ struct Telemetry: Sendable {
     var model: AgentModel
     var quota: Quota
     var source: String            // "LIVE", "DEMO", …
+    /// False when the source has nothing meaningful to render (no events
+    /// yet, or the pinned session has been removed). FrameLoop swaps in
+    /// the clock fallback when this is false.
+    var hasContent: Bool = true
 }
 
 extension Telemetry {
@@ -139,7 +143,8 @@ extension Telemetry {
                             resetInSec: 7 * 86400),
             ]
         )
-        return Telemetry(agent: agent, model: model, quota: quota, source: "LIVE")
+        return Telemetry(agent: agent, model: model, quota: quota,
+                         source: "LIVE", hasContent: false)
     }
 }
 

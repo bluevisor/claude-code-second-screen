@@ -24,13 +24,19 @@ enum MatrixTheme {
 
     // MARK: - Fonts
 
+    /// Multiplier applied to every `font(…)` call so the dashboard can be
+    /// retuned in one place. Bumped from 1.0 after the first hardware test
+    /// showed the panel was readable but a touch small.
+    static let fontScale: CGFloat = 1.12
+
     /// JetBrains Mono in the requested point size and weight.
     /// Falls back to `Menlo` when the bundled font isn't registered yet.
     static func font(_ pointSize: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
-        if let f = NSFont(name: fontName(for: weight), size: pointSize) {
+        let size = (pointSize * fontScale).rounded()
+        if let f = NSFont(name: fontName(for: weight), size: size) {
             return f
         }
-        return NSFont.monospacedSystemFont(ofSize: pointSize, weight: weight)
+        return NSFont.monospacedSystemFont(ofSize: size, weight: weight)
     }
 
     /// Map PySide6 weight → JetBrains Mono variant. We register all variants
