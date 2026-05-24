@@ -1313,15 +1313,38 @@ final class MatrixRenderer: @unchecked Sendable {
         MatrixTheme.metrics(of: font).capHeight
     }
 
+    /// Single-slot CTLine cache. Many text sites measure first then
+    /// draw the same string immediately — the second call now hits the
+    /// cache and skips the dict/NSAttributedString/CTLine creation.
+    /// Heterogeneous draw sequences just bounce the slot; that's fine
+    /// because each line is still built only once (vs. previously
+    /// twice — once for measure, once for draw).
+    private var ctLineCache: (
+        string: String, font: NSFont, color: NSColor, line: CTLine
+    )?
+
+    /// Build (or fetch from the single-slot cache) a CTLine with the
+    /// pooled attribute dict. Both `drawText` and `stringWidth` go
+    /// through here so measure-then-draw of the same string with the
+    /// same (font, color) only constructs the line once.
+    private func ctLine(_ s: String, font: NSFont, color: NSColor) -> CTLine {
+        if let cached = ctLineCache,
+           cached.font === font, cached.color === color,
+           cached.string == s {
+            return cached.line
+        }
+        let attrs = MatrixTheme.attributes(font: font, color: color)
+        let line = CTLineCreateWithAttributedString(
+            NSAttributedString(string: s, attributes: attrs))
+        ctLineCache = (s, font, color, line)
+        return line
+    }
+
     /// Draw a string with its (x, y) interpreted as the top-left of the
     /// cap-box (matches `_text()` in matrix.py). Returns advance width.
     private func drawText(_ ctx: CGContext, _ s: String, font: NSFont,
                           color: NSColor, position: CGPoint) -> CGFloat {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color,
-        ]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attrs))
+        let line = ctLine(s, font: font, color: color)
         ctx.saveGState()
         // Move to baseline. Caller's y is "top of ascent"; baseline = y + ascent.
         let baselineY = position.y + MatrixTheme.metrics(of: font).ascender
@@ -1334,9 +1357,13 @@ final class MatrixRenderer: @unchecked Sendable {
         return CTLineGetTypographicBounds(line, nil, nil, nil).rounded()
     }
 
-    private func stringWidth(_ s: String, font: NSFont) -> CGFloat {
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attrs))
+    /// Measure the typographic width of a string. Optionally passes a
+    /// color through so measure-then-draw with the same args hits the
+    /// CTLine cache. Default color (`ink`) covers the bulk of body
+    /// text; non-ink draws can pass an explicit color to opt in.
+    private func stringWidth(_ s: String, font: NSFont,
+                             color: NSColor = MatrixTheme.ink) -> CGFloat {
+        let line = ctLine(s, font: font, color: color)
         return CTLineGetTypographicBounds(line, nil, nil, nil).rounded()
     }
 
