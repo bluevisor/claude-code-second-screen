@@ -35,14 +35,95 @@ enum MatrixTheme {
     static let fontScale: CGFloat = 1.25
 
     /// JetBrains Mono in the requested point size and weight.
-    /// Falls back to `Menlo` when the bundled font isn't registered yet.
+    /// Falls back to system mono when the bundled font isn't registered yet.
+    ///
+    /// Cached by `(size, weightRaw)` so the per-frame draw loop doesn't
+    /// pay an `NSFont(name:size:)` round-trip on every text call — the
+    /// matrix dashboard hits this ~30+ times per frame across ~12 unique
+    /// font variants.
     static func font(_ pointSize: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
         let size = (pointSize * fontScale).rounded()
-        if let f = NSFont(name: fontName(for: weight), size: size) {
-            return f
-        }
-        return NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+        // NSCache is documented thread-safe per the cocoa headers; safe
+        // for the work-queue draw path. Key by "size,weightRaw" as
+        // NSString since NSCache wants NSObject keys.
+        let key = "\(size)|\(weight.rawValue)" as NSString
+        if let cached = fontCache.object(forKey: key) { return cached }
+        let font = NSFont(name: fontName(for: weight), size: size)
+            ?? NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+        fontCache.setObject(font, forKey: key)
+        return font
     }
+
+    /// Returns cached typographic metrics for `font`. NSFont's own
+    /// `ascender` / `capHeight` accessors bridge into Core Text on every
+    /// call — caching saves dozens of round-trips per frame across the
+    /// many `capTopOrigin` / baseline computations.
+    static func metrics(of font: NSFont) -> FontMetrics {
+        if let cached = metricsCache.object(forKey: font) { return cached }
+        let m = FontMetrics(
+            ascender: font.ascender,
+            descender: font.descender,
+            capHeight: font.capHeight > 0 ? font.capHeight : font.pointSize * 0.7,
+            pointSize: font.pointSize
+        )
+        metricsCache.setObject(m, forKey: font)
+        return m
+    }
+
+    /// Reference type so it can live in an NSCache.
+    final class FontMetrics {
+        let ascender: CGFloat
+        let descender: CGFloat
+        let capHeight: CGFloat
+        let pointSize: CGFloat
+        init(ascender: CGFloat, descender: CGFloat,
+             capHeight: CGFloat, pointSize: CGFloat) {
+            self.ascender = ascender
+            self.descender = descender
+            self.capHeight = capHeight
+            self.pointSize = pointSize
+        }
+    }
+
+    private nonisolated(unsafe) static let fontCache: NSCache<NSString, NSFont> = {
+        let c = NSCache<NSString, NSFont>()
+        c.countLimit = 64
+        return c
+    }()
+    private nonisolated(unsafe) static let metricsCache: NSCache<NSFont, FontMetrics> = {
+        let c = NSCache<NSFont, FontMetrics>()
+        c.countLimit = 64
+        return c
+    }()
+
+    /// Returns a cached attribute dictionary for `(font, color)`. The
+    /// renderer hits this on every text draw — the previous code
+    /// allocated a fresh `[NSAttributedString.Key: Any]` each call.
+    /// Keys use the address of the font and the components of the
+    /// color so identity comparisons stay cheap. The pool tops out at
+    /// a small handful of distinct combinations across the dashboard.
+    static func attributes(font: NSFont, color: NSColor) -> [NSAttributedString.Key: Any] {
+        let key = "\(ObjectIdentifier(font).hashValue)|\(color.cgColor.numberOfComponents)|\(color.cgColor.components ?? [0])" as NSString
+        if let cached = attrCache.object(forKey: key) {
+            // NSDictionary holds Any values; cast to Swift dict.
+            // The conversion is cheap because the underlying storage
+            // is shared (CFDictionary).
+            return cached as? [NSAttributedString.Key: Any]
+                ?? [.font: font, .foregroundColor: color]
+        }
+        let dict: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+        ]
+        attrCache.setObject(dict as NSDictionary, forKey: key)
+        return dict
+    }
+
+    private nonisolated(unsafe) static let attrCache: NSCache<NSString, NSDictionary> = {
+        let c = NSCache<NSString, NSDictionary>()
+        c.countLimit = 64
+        return c
+    }()
 
     /// Map PySide6 weight → JetBrains Mono variant. We register all variants
     /// from the bundled .ttf files at app startup; see `FontRegistration`.
@@ -57,6 +138,43 @@ enum MatrixTheme {
         default: return "JetBrainsMono-Regular"
         }
     }
+
+    // MARK: - Date helpers
+
+    /// Weekday strings cached per (format, day-of-year) so we don't pay
+    /// `DateFormatter` allocation + parse on every draw. The matrix
+    /// dashboard's rail + footer + clock fallback each pull "EEEE" or
+    /// "EEE" once per frame; without the cache that's 3-4 fresh
+    /// DateFormatters per frame.
+    static func weekday(_ date: Date, short: Bool = false) -> String {
+        // Key by (year, day, format) — `.day` of `.year` is the natural
+        // "this calendar day" identifier on macOS 14, where `.dayOfYear`
+        // isn't available yet.
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.year, .month, .day], from: date)
+        let key = "\(comps.year ?? 0)|\(comps.month ?? 0)|\(comps.day ?? 0)|\(short ? "EEE" : "EEEE")" as NSString
+        if let cached = weekdayCache.object(forKey: key) as String? { return cached }
+        let formatter = short ? shortWeekdayFormatter : longWeekdayFormatter
+        let str = formatter.string(from: date).uppercased()
+        weekdayCache.setObject(str as NSString, forKey: key)
+        return str
+    }
+
+    private static let longWeekdayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEEE"
+        return f
+    }()
+    private static let shortWeekdayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE"
+        return f
+    }()
+    private nonisolated(unsafe) static let weekdayCache: NSCache<NSString, NSString> = {
+        let c = NSCache<NSString, NSString>()
+        c.countLimit = 16
+        return c
+    }()
 
     // MARK: - Verb maps
 

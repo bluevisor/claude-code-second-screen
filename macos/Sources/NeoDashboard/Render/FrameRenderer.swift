@@ -13,17 +13,21 @@ import Foundation
 protocol FrameRenderer: AnyObject, Sendable {
     /// Render one canvas-sized frame. `blink` is a monotonically-increasing
     /// phase the implementation can use for caret/scan animations.
-    func render(_ telemetry: Telemetry, blink: Double, now: Date) -> CGImage?
+    /// `blackAlpha` (0…1) is filled over the final composite inside the
+    /// renderer's own context — used by FrameLoop's fade machine so we
+    /// don't allocate a second CGContext just to add the overlay.
+    func render(_ telemetry: Telemetry, blink: Double, now: Date,
+                blackAlpha: Double) -> CGImage?
 
     /// Render an idle/clock-mode frame in the renderer's own visual style.
     /// Default returns `nil` — FrameLoop falls back to the generic
     /// `ClockRenderer` (matrix-themed). Implementations that want their
     /// theme to carry through the clock fallback should override.
-    func renderClock(blink: Double, now: Date) -> CGImage?
+    func renderClock(blink: Double, now: Date, blackAlpha: Double) -> CGImage?
 }
 
 extension FrameRenderer {
-    func renderClock(blink: Double, now: Date) -> CGImage? { nil }
+    func renderClock(blink: Double, now: Date, blackAlpha: Double) -> CGImage? { nil }
 }
 
 extension MatrixRenderer: FrameRenderer {}

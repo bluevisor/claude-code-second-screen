@@ -22,6 +22,18 @@ final class RainPainter {
     private var columns: [Column] = []
     private var lastStep: TimeInterval = 0
     private let stepInterval: TimeInterval
+    /// Cached rendering of the current column state, reused between
+    /// `step()` calls. Only populated when `useCache` is true.
+    private var cachedFrame: CGImage?
+    /// Whether the offscreen cache is worth keeping. It pays off when
+    /// the rain steps meaningfully slower than the host renders — every
+    /// "between-step" draw becomes a cheap image stamp. When `stepHz`
+    /// matches the draw rate, every draw triggers a step → the cache
+    /// invalidates every frame and the offscreen ctx alloc + makeImage
+    /// becomes pure overhead vs. painting glyphs directly. The 20 Hz
+    /// threshold assumes the host loop runs at 30 fps.
+    private let useCache: Bool
+    private let colorSpace = CGColorSpaceCreateDeviceRGB()
     /// Half-width katakana (U+FF61–U+FF9F block) rather than full-width
     /// kana. Full-width katakana render roughly twice as wide as the ASCII
     /// digits, so columns mixing the two no longer lined up on the fixed
@@ -44,9 +56,10 @@ final class RainPainter {
     /// Pre-baked trail-alpha colors keyed by row offset from the head.
     private let trailColors: [CGColor]
 
-    init(canvasSize: CGSize = MatrixTheme.canvasSize, stepHz: Double = 12) {
+    init(canvasSize: CGSize = MatrixTheme.canvasSize, stepHz: Double = 30) {
         self.canvasSize = canvasSize
         self.stepInterval = 1.0 / max(1, stepHz)
+        self.useCache = stepHz < 20
         let baseFont = Self.rainFont(
             size: MatrixTheme.font(11, weight: .medium).pointSize
         ) as CTFont
@@ -101,13 +114,77 @@ final class RainPainter {
     func draw(into ctx: CGContext, now: TimeInterval) {
         if now - lastStep >= stepInterval {
             step()
+            cachedFrame = nil
             lastStep = now
         }
+        guard useCache else {
+            // Step rate is at or near draw rate — the cache would
+            // invalidate every frame anyway. Paint directly into ctx so
+            // we avoid the offscreen alloc + makeImage round-trip.
+            // P2's batched-by-color CTFontDrawGlyphs still applies.
+            paintGlyphs(into: ctx)
+            return
+        }
+        // Reuse the cache when the column state hasn't changed since the
+        // last step — same pixels, no glyph drawing. ctx is y-flipped
+        // (screen coords); the cache is rendered in the same flipped
+        // frame, so we counter-flip locally to stamp it upright.
+        if cachedFrame == nil { cachedFrame = renderCache() }
+        guard let img = cachedFrame else { return }
         ctx.saveGState()
-        ctx.textMatrix = .identity
+        ctx.translateBy(x: 0, y: canvasSize.height)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(img, in: CGRect(x: 0, y: 0,
+                                 width: canvasSize.width,
+                                 height: canvasSize.height))
+        ctx.restoreGState()
+    }
+
+    /// Builds a fresh cache image of the current column state. The
+    /// offscreen context applies the same y-flip the main render ctx
+    /// has so the inner glyph-paint code keeps using screen coords.
+    private func renderCache() -> CGImage? {
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(canvasSize.width), height: Int(canvasSize.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        ctx.translateBy(x: 0, y: canvasSize.height)
+        ctx.scaleBy(x: 1, y: -1)
+        paintGlyphs(into: ctx)
+        return ctx.makeImage()
+    }
+
+    /// Paint every visible glyph into a y-flipped context (screen
+    /// coords). Glyphs are grouped by trail-color index so each color
+    /// is drawn in one `CTFontDrawGlyphs` call instead of one call per
+    /// glyph — eliminating ~2,600 `saveGState/restoreGState/translate/
+    /// scale` cycles on a busy portrait canvas.
+    ///
+    /// Position math: the outer ctx is y-flipped (screen coords).
+    /// `scaleBy(x: 1, y: -1)` once at the start converts the local
+    /// frame to y-up so CTFontDrawGlyphs draws glyphs upright; a
+    /// per-glyph baseline in screen-coord `(col.x, y + 11)` becomes
+    /// `(col.x, -(y + 11))` in that y-up frame.
+    private func paintGlyphs(into ctx: CGContext) {
         let lastTrailIdx = trailColors.count - 1
-        var glyph: CGGlyph = 0
-        let origin = CGPoint.zero
+        // Pre-allocate per-color buckets; reused across runs would be
+        // ideal but `paintGlyphs` runs at the step rate (~12 Hz) so
+        // per-call allocation is fine.
+        var glyphsByColor: [[CGGlyph]] = Array(repeating: [], count: trailColors.count)
+        var posByColor: [[CGPoint]] = Array(repeating: [], count: trailColors.count)
+        // Rough upper bound: every column contributes its full
+        // lengthRows worth of glyphs. Hint capacity so the per-color
+        // arrays don't repeatedly realloc as we append.
+        let estimatedPerColor = max(8, columns.count * 2 / trailColors.count)
+        for i in 0..<trailColors.count {
+            glyphsByColor[i].reserveCapacity(estimatedPerColor)
+            posByColor[i].reserveCapacity(estimatedPerColor)
+        }
+
         for col in columns {
             for j in 0..<col.lengthRows {
                 let row = col.headRow - j
@@ -116,15 +193,25 @@ final class RainPainter {
                 if y > canvasSize.height + glyphHeight { continue }
                 let charKey = col.glyphs[j % col.glyphs.count]
                 guard let gid = glyphIDs[charKey], gid != 0 else { continue }
-                ctx.setFillColor(trailColors[min(j, lastTrailIdx)])
-                ctx.saveGState()
-                ctx.translateBy(x: col.x, y: y + 11)
-                ctx.scaleBy(x: 1, y: -1)
-                glyph = gid
-                withUnsafePointer(to: origin) { ptr in
-                    CTFontDrawGlyphs(font, &glyph, ptr, 1, ctx)
+                let idx = min(j, lastTrailIdx)
+                glyphsByColor[idx].append(gid)
+                posByColor[idx].append(CGPoint(x: col.x, y: -(y + 11)))
+            }
+        }
+
+        ctx.saveGState()
+        ctx.textMatrix = .identity
+        ctx.scaleBy(x: 1, y: -1)
+        for idx in 0..<trailColors.count where !glyphsByColor[idx].isEmpty {
+            ctx.setFillColor(trailColors[idx])
+            let glyphs = glyphsByColor[idx]
+            let positions = posByColor[idx]
+            glyphs.withUnsafeBufferPointer { gPtr in
+                positions.withUnsafeBufferPointer { pPtr in
+                    CTFontDrawGlyphs(font, gPtr.baseAddress!,
+                                     pPtr.baseAddress!,
+                                     glyphs.count, ctx)
                 }
-                ctx.restoreGState()
             }
         }
         ctx.restoreGState()

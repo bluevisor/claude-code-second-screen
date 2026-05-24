@@ -28,9 +28,71 @@ final class MatrixRenderer: @unchecked Sendable {
     /// vertical-stack layout used on 90°/270° rotations.
     private var isPortrait: Bool { size.height > size.width }
 
+    // MARK: - Cached gradients
+    //
+    // These depend only on the renderer's color space + (for vignette
+    // and background) canvas size — all instance-lifetime constants.
+    // `lazy var` is fine here: `MatrixRenderer` is single-threaded on
+    // the FrameLoop's work queue.
+    private lazy var backgroundGradient: CGGradient = {
+        CGGradient(colorsSpace: colorSpace,
+                   colors: [MatrixTheme.bgTop.cgColor,
+                            MatrixTheme.bgBot.cgColor] as CFArray,
+                   locations: [0, 1])!
+    }()
+    private lazy var vignetteGradient: CGGradient = {
+        // `drawVignette` is only ever called with strength=0.42 from the
+        // matrix-theme paths; bake it in. If we ever need variable
+        // strength, swap to a small per-strength cache.
+        CGGradient(colorsSpace: colorSpace,
+                   colors: [
+                    NSColor.black.withAlphaComponent(0).cgColor,
+                    NSColor.black.withAlphaComponent(0.42).cgColor,
+                   ] as CFArray,
+                   locations: [0, 1])!
+    }()
+    private lazy var panelBgGradient: CGGradient = {
+        CGGradient(colorsSpace: colorSpace,
+                   colors: [
+                    NSColor(srgbRed: 8/255.0, green: 22/255.0, blue: 18/255.0, alpha: 0.97).cgColor,
+                    NSColor(srgbRed: 4/255.0, green: 12/255.0, blue: 10/255.0, alpha: 0.94).cgColor,
+                   ] as CFArray,
+                   locations: [0, 1])!
+    }()
+    private lazy var panelSheenGradient: CGGradient = {
+        CGGradient(colorsSpace: colorSpace,
+                   colors: [
+                    NSColor(srgbRed: 41/255.0, green: 255/255.0, blue: 140/255.0, alpha: 12/255.0).cgColor,
+                    NSColor.black.withAlphaComponent(0).cgColor,
+                   ] as CFArray,
+                   locations: [0, 1])!
+    }()
+
+    /// Pre-baked scanline strap — 1px black rows every 2px at the
+    /// renderer's only caller-opacity (0.78), composited as a single
+    /// `ctx.draw` per frame instead of ~240 (landscape) or ~640
+    /// (portrait) `ctx.fill` calls.
+    private lazy var scanlineImage: CGImage? = {
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.30 * 0.78).cgColor)
+        var y: CGFloat = 0
+        while y < size.height {
+            ctx.fill(CGRect(x: 0, y: y, width: size.width, height: 1))
+            y += 2
+        }
+        return ctx.makeImage()
+    }()
+
     init(size: CGSize = MatrixTheme.canvasSize,
          showRain: Bool = true,
-         rainFPS: Double = 12) {
+         rainFPS: Double = 30) {
         self.size = size
         self.showRain = showRain
         self.rain = RainPainter(canvasSize: size, stepHz: rainFPS)
@@ -38,7 +100,10 @@ final class MatrixRenderer: @unchecked Sendable {
 
     /// Render one frame and return the resulting CGImage. `blink` is a
     /// monotonically-increasing phase used for the caret + scan animations.
-    func render(_ tel: Telemetry, blink: Double, now: Date) -> CGImage? {
+    /// `blackAlpha` (0…1) overlays a translucent black fill on top of the
+    /// composite — used by FrameLoop's fade machine.
+    func render(_ tel: Telemetry, blink: Double, now: Date,
+                blackAlpha: Double = 0) -> CGImage? {
         guard let ctx = CGContext(
             data: nil,
             width: Int(size.width),
@@ -66,8 +131,23 @@ final class MatrixRenderer: @unchecked Sendable {
         drawScanlines(into: ctx, opacity: 0.78)
         drawVignette(into: ctx, strength: 0.42)
 
+        // Fade overlay (if active) goes on top before CRT so it darkens
+        // the chromatic-aberration pass too — visually identical to the
+        // old post-process step that wrapped the final image.
+        applyFade(into: ctx, alpha: blackAlpha)
+
         guard let raw = ctx.makeImage() else { return nil }
         return crt.process(raw) ?? raw
+    }
+
+    /// Composite a translucent black fill across the whole canvas. Caller
+    /// passes `0` to skip; we still no-op explicitly so the cheap path is
+    /// `alpha > 0` check, no GState push.
+    private func applyFade(into ctx: CGContext, alpha: Double) {
+        guard alpha > 0 else { return }
+        ctx.setFillColor(NSColor.black.withAlphaComponent(
+            min(1, max(0, CGFloat(alpha)))).cgColor)
+        ctx.fill(CGRect(origin: .zero, size: size))
     }
 
     // MARK: - Layouts
@@ -178,10 +258,7 @@ final class MatrixRenderer: @unchecked Sendable {
 
     private func drawBackground(into ctx: CGContext, now: Date) {
         // Vertical phosphor gradient.
-        let grad = CGGradient(colorsSpace: colorSpace,
-            colors: [MatrixTheme.bgTop.cgColor, MatrixTheme.bgBot.cgColor] as CFArray,
-            locations: [0, 1])!
-        ctx.drawLinearGradient(grad,
+        ctx.drawLinearGradient(backgroundGradient,
                                start: CGPoint(x: 0, y: 0),
                                end: CGPoint(x: 0, y: size.height),
                                options: [])
@@ -191,35 +268,36 @@ final class MatrixRenderer: @unchecked Sendable {
     }
 
     private func drawScanlines(into ctx: CGContext, opacity: CGFloat) {
+        // Opacity is preserved on the signature but unused — the only
+        // caller passes 0.78, baked into `scanlineImage`. If we ever
+        // need variable opacity, fall back to the per-row fill loop.
+        _ = opacity
+        guard let img = scanlineImage else { return }
+        // `ctx` is already y-flipped (screen coords). A naive
+        // `ctx.draw(img, in:)` would render the image upside-down;
+        // counter-flip locally so image y=0 lands at screen y=0 — same
+        // pattern ClockRenderer uses for its cached static layer.
         ctx.saveGState()
-        // Slightly more punch per line (was 0.22) so the strap pattern
-        // reads as a real CRT effect, not a faint hint.
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.30 * opacity).cgColor)
-        var y: CGFloat = 0
-        while y < size.height {
-            ctx.fill(CGRect(x: 0, y: y, width: size.width, height: 1))
-            y += 2
-        }
+        ctx.translateBy(x: 0, y: size.height)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: size.width, height: size.height))
         ctx.restoreGState()
     }
 
     /// CRT-style edge vignette — radial gradient from clear at the center
-    /// of the canvas to translucent black at the corners. `strength` is the
-    /// alpha at the outer edge; the inner clear radius scales with the
-    /// shorter canvas axis so the result reads the same on any size.
+    /// of the canvas to translucent black at the corners. The strength
+    /// is baked into `vignetteGradient` (0.42) since the only caller
+    /// passes that value; if other strengths are ever needed, swap to a
+    /// per-strength cache. Inner clear radius scales with the shorter
+    /// canvas axis so the result reads the same on any size.
     private func drawVignette(into ctx: CGContext, strength: CGFloat) {
+        _ = strength
         let centerX = size.width / 2
         let centerY = size.height / 2
         let innerRadius = min(size.width, size.height) * 0.32
         let outerRadius = hypot(centerX, centerY) * 1.05
-        let grad = CGGradient(colorsSpace: colorSpace,
-            colors: [
-                NSColor.black.withAlphaComponent(0).cgColor,
-                NSColor.black.withAlphaComponent(strength).cgColor,
-            ] as CFArray,
-            locations: [0, 1])!
         ctx.saveGState()
-        ctx.drawRadialGradient(grad,
+        ctx.drawRadialGradient(vignetteGradient,
             startCenter: CGPoint(x: centerX, y: centerY),
             startRadius: innerRadius,
             endCenter: CGPoint(x: centerX, y: centerY),
@@ -232,24 +310,14 @@ final class MatrixRenderer: @unchecked Sendable {
 
     private func drawPanel(_ ctx: CGContext, rect: CGRect) {
         // Translucent background gradient.
-        let bgGrad = CGGradient(colorsSpace: colorSpace,
-            colors: [
-                NSColor(srgbRed: 8/255.0, green: 22/255.0, blue: 18/255.0, alpha: 0.97).cgColor,
-                NSColor(srgbRed: 4/255.0, green: 12/255.0, blue: 10/255.0, alpha: 0.94).cgColor,
-            ] as CFArray, locations: [0, 1])!
         ctx.saveGState()
         ctx.addRect(rect); ctx.clip()
-        ctx.drawLinearGradient(bgGrad,
+        ctx.drawLinearGradient(panelBgGradient,
                                start: CGPoint(x: rect.minX, y: rect.minY),
                                end: CGPoint(x: rect.minX, y: rect.maxY),
                                options: [])
         // Subtle inner phosphor sheen.
-        let sheen = CGGradient(colorsSpace: colorSpace,
-            colors: [
-                NSColor(srgbRed: 41/255.0, green: 255/255.0, blue: 140/255.0, alpha: 12/255.0).cgColor,
-                NSColor.black.withAlphaComponent(0).cgColor,
-            ] as CFArray, locations: [0, 1])!
-        ctx.drawLinearGradient(sheen,
+        ctx.drawLinearGradient(panelSheenGradient,
                                start: CGPoint(x: rect.minX, y: rect.minY),
                                end: CGPoint(x: rect.maxX, y: rect.maxY),
                                options: [])
@@ -329,11 +397,7 @@ final class MatrixRenderer: @unchecked Sendable {
                        position: capTopOrigin(rowMid: rowMid, font: sessFont, x: cx)) + 12
 
         // Right side — weekday + date.
-        let weekdayStr: String = {
-            let f = DateFormatter()
-            f.dateFormat = "EEEE"
-            return f.string(from: now).uppercased()
-        }()
+        let weekdayStr = MatrixTheme.weekday(now)
         let dateString = "\(weekdayStr)  \(dateText(now))"
         let dateWidth = stringWidth(dateString, font: dateFont)
         let dateX = rect.maxX - dateWidth
@@ -394,11 +458,7 @@ final class MatrixRenderer: @unchecked Sendable {
 
         // Agent label.
         let label = tel.agent.kind.uppercased().replacingOccurrences(of: "-", with: " ")
-        let weekday: String = {
-            let f = DateFormatter()
-            f.dateFormat = "EEE"
-            return f.string(from: now).uppercased()
-        }()
+        let weekday = MatrixTheme.weekday(now, short: true)
         let dateStr = "\(weekday) \(dateText(now))"
         let dateW = stringWidth(dateStr, font: dateFont)
         let labelMax = rect.maxX - dateW - 12 - cx
@@ -791,12 +851,75 @@ final class MatrixRenderer: @unchecked Sendable {
         } else {
             resourceName = "openai-logo"
         }
-        guard let img = Self.badgeImage(named: resourceName) else { return }
+        if let img = Self.badgeImage(named: resourceName) {
+            ctx.saveGState()
+            ctx.translateBy(x: rect.minX, y: rect.minY)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.translateBy(x: 0, y: -rect.height)
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: rect.width, height: rect.height))
+            ctx.restoreGState()
+            return
+        }
+        // Procedural fallback — used for `google` when no PNG is bundled.
+        // Draws the four-color Google "G" mark from CG primitives so the
+        // badge slot doesn't render blank.
+        if provider == "google" {
+            drawGoogleGBadge(into: ctx, rect: rect)
+        }
+    }
+
+    /// Render a simplified Google "G" mark in the brand quadrant colors.
+    /// Filled ring with the right-middle quadrant cut by a horizontal bar
+    /// to suggest the G crossbar. Not a pixel-exact reproduction of the
+    /// official logo — recognisable enough as a Gemini/Google indicator.
+    private func drawGoogleGBadge(into ctx: CGContext, rect: CGRect) {
+        let cx = rect.midX
+        let cy = rect.midY
+        let outerR = min(rect.width, rect.height) / 2 * 0.92
+        let strokeW = outerR * 0.30
+        let innerR = outerR - strokeW
+
+        // Brand quadrant colors. Using the published Material/Google
+        // palette so the indicator reads as the canonical G mark even
+        // without the exact letter form.
+        let blue   = NSColor(srgbRed: 66/255.0,  green: 133/255.0, blue: 244/255.0, alpha: 1).cgColor
+        let red    = NSColor(srgbRed: 234/255.0, green:  67/255.0, blue:  53/255.0, alpha: 1).cgColor
+        let yellow = NSColor(srgbRed: 251/255.0, green: 188/255.0, blue:   4/255.0, alpha: 1).cgColor
+        let green  = NSColor(srgbRed:  52/255.0, green: 168/255.0, blue:  83/255.0, alpha: 1).cgColor
+
+        // Y-axis is flipped (screen coords) — angles in CG are CCW in y-up,
+        // so in our frame "positive sweep" reads as clockwise. We draw four
+        // colored arcs each spanning ~90°, leaving a notch on the right for
+        // the G crossbar and a horizontal slot cut from the center outward.
+        let quadrants: [(CGFloat, CGFloat, CGColor)] = [
+            // Start, end (radians, CG convention), color.
+            (-.pi / 2,  0,           blue),    // top → right (≈ blue band)
+            (.pi,      -.pi / 2,     red),     // left → top (≈ red band)
+            (.pi / 2,  .pi,          yellow),  // bottom → left (≈ yellow band)
+            (0,        .pi / 2,      green),   // right → bottom (≈ green band)
+        ]
+        for (start, end, color) in quadrants {
+            ctx.saveGState()
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: cx + cos(start) * innerR,
+                                 y: cy + sin(start) * innerR))
+            ctx.addArc(center: CGPoint(x: cx, y: cy), radius: outerR,
+                       startAngle: start, endAngle: end, clockwise: false)
+            ctx.addArc(center: CGPoint(x: cx, y: cy), radius: innerR,
+                       startAngle: end, endAngle: start, clockwise: true)
+            ctx.closePath()
+            ctx.setFillColor(color)
+            ctx.fillPath()
+            ctx.restoreGState()
+        }
+
+        // Crossbar slot — punch a horizontal channel from the center out
+        // through the right side so the ring reads as a "G".
+        let barH = strokeW * 0.85
         ctx.saveGState()
-        ctx.translateBy(x: rect.minX, y: rect.minY)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.translateBy(x: 0, y: -rect.height)
-        ctx.draw(img, in: CGRect(x: 0, y: 0, width: rect.width, height: rect.height))
+        ctx.setBlendMode(.clear)
+        ctx.fill(CGRect(x: cx, y: cy - barH / 2,
+                        width: outerR + 2, height: barH))
         ctx.restoreGState()
     }
 
@@ -1044,7 +1167,7 @@ final class MatrixRenderer: @unchecked Sendable {
 
         // Right stats. Weather replaces the legacy UTC-offset chip; until
         // the first network refresh succeeds we show a placeholder.
-        let weatherText = (WeatherService.shared.summary ?? "—").uppercased()
+        let weatherText = WeatherService.shared.summaryUppercased ?? "—"
         let weatherW = stringWidth(weatherText, font: smallFont)
         _ = drawText(ctx, weatherText, font: smallFont, color: MatrixTheme.inkDim,
                      position: CGPoint(x: rect.maxX - weatherW, y: smallTopY))
@@ -1127,7 +1250,7 @@ final class MatrixRenderer: @unchecked Sendable {
             lx += bw + 10
         }
 
-        let weatherText = (WeatherService.shared.summary ?? "—").uppercased()
+        let weatherText = WeatherService.shared.summaryUppercased ?? "—"
         let weatherW = stringWidth(weatherText, font: smallFont)
         // Clamp weather to whatever space the stats left so it never
         // collides — elide before drawing if necessary.
@@ -1244,26 +1367,50 @@ final class MatrixRenderer: @unchecked Sendable {
 
     private func capTopOrigin(rowMid: CGFloat, font: NSFont, x: CGFloat) -> CGPoint {
         // y_text = rowMid - capHeight/2 - (ascent - capHeight)
-        let y = rowMid - capHeight(of: font) / 2 - (font.ascender - capHeight(of: font))
+        let m = MatrixTheme.metrics(of: font)
+        let y = rowMid - m.capHeight / 2 - (m.ascender - m.capHeight)
         return CGPoint(x: x, y: y)
     }
 
     private func capHeight(of font: NSFont) -> CGFloat {
-        return font.capHeight > 0 ? font.capHeight : font.pointSize * 0.7
+        MatrixTheme.metrics(of: font).capHeight
+    }
+
+    /// Single-slot CTLine cache. Many text sites measure first then
+    /// draw the same string immediately — the second call now hits the
+    /// cache and skips the dict/NSAttributedString/CTLine creation.
+    /// Heterogeneous draw sequences just bounce the slot; that's fine
+    /// because each line is still built only once (vs. previously
+    /// twice — once for measure, once for draw).
+    private var ctLineCache: (
+        string: String, font: NSFont, color: NSColor, line: CTLine
+    )?
+
+    /// Build (or fetch from the single-slot cache) a CTLine with the
+    /// pooled attribute dict. Both `drawText` and `stringWidth` go
+    /// through here so measure-then-draw of the same string with the
+    /// same (font, color) only constructs the line once.
+    private func ctLine(_ s: String, font: NSFont, color: NSColor) -> CTLine {
+        if let cached = ctLineCache,
+           cached.font === font, cached.color === color,
+           cached.string == s {
+            return cached.line
+        }
+        let attrs = MatrixTheme.attributes(font: font, color: color)
+        let line = CTLineCreateWithAttributedString(
+            NSAttributedString(string: s, attributes: attrs))
+        ctLineCache = (s, font, color, line)
+        return line
     }
 
     /// Draw a string with its (x, y) interpreted as the top-left of the
     /// cap-box (matches `_text()` in matrix.py). Returns advance width.
     private func drawText(_ ctx: CGContext, _ s: String, font: NSFont,
                           color: NSColor, position: CGPoint) -> CGFloat {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color,
-        ]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attrs))
+        let line = ctLine(s, font: font, color: color)
         ctx.saveGState()
         // Move to baseline. Caller's y is "top of ascent"; baseline = y + ascent.
-        let baselineY = position.y + font.ascender
+        let baselineY = position.y + MatrixTheme.metrics(of: font).ascender
         ctx.textMatrix = .identity
         ctx.translateBy(x: position.x, y: baselineY)
         ctx.scaleBy(x: 1, y: -1)
@@ -1273,9 +1420,13 @@ final class MatrixRenderer: @unchecked Sendable {
         return CTLineGetTypographicBounds(line, nil, nil, nil).rounded()
     }
 
-    private func stringWidth(_ s: String, font: NSFont) -> CGFloat {
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attrs))
+    /// Measure the typographic width of a string. Optionally passes a
+    /// color through so measure-then-draw with the same args hits the
+    /// CTLine cache. Default color (`ink`) covers the bulk of body
+    /// text; non-ink draws can pass an explicit color to opt in.
+    private func stringWidth(_ s: String, font: NSFont,
+                             color: NSColor = MatrixTheme.ink) -> CGFloat {
+        let line = ctLine(s, font: font, color: color)
         return CTLineGetTypographicBounds(line, nil, nil, nil).rounded()
     }
 

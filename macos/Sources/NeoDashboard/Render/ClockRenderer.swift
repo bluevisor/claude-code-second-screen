@@ -23,10 +23,11 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     init(size: CGSize = MatrixTheme.canvasSize, showRain: Bool = true) {
         self.size = size
         self.showRain = showRain
-        self.rain = RainPainter(canvasSize: size, stepHz: 10)
+        self.rain = RainPainter(canvasSize: size, stepHz: 30)
     }
 
-    func render(_ telemetry: Telemetry, blink: Double, now: Date) -> CGImage? {
+    func render(_ telemetry: Telemetry, blink: Double, now: Date,
+                blackAlpha: Double = 0) -> CGImage? {
         guard let ctx = CGContext(
             data: nil,
             width: Int(size.width), height: Int(size.height),
@@ -63,6 +64,14 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
         drawClock(into: ctx, now: now, blink: blink)
         drawVignette(into: ctx, strength: 0.42)
 
+        // Fade overlay before CRT — matches FrameLoop's old post-process
+        // semantics but folded into the existing context.
+        if blackAlpha > 0 {
+            ctx.setFillColor(NSColor.black.withAlphaComponent(
+                min(1, max(0, CGFloat(blackAlpha)))).cgColor)
+            ctx.fill(CGRect(origin: .zero, size: size))
+        }
+
         guard let raw = ctx.makeImage() else { return nil }
         return crt.process(raw) ?? raw
     }
@@ -71,7 +80,7 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     /// date/weather text underneath it would change.
     private func cachedStaticLayer(now: Date) -> CGImage? {
         let dateKey = dateLabel(now: now)
-        let weather = (WeatherService.shared.summary ?? "—").uppercased()
+        let weather = WeatherService.shared.summaryUppercased ?? "—"
         let key = "\(dateKey)|\(weather)"
         if let cached = staticLayer, cached.key == key { return cached.image }
 
@@ -104,11 +113,7 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     }
 
     private func dateLabel(now: Date) -> String {
-        let weekday: String = {
-            let f = DateFormatter()
-            f.dateFormat = "EEEE"
-            return f.string(from: now).uppercased()
-        }()
+        let weekday = MatrixTheme.weekday(now)
         return "\(weekday)  \(dateText(now))"
     }
 
@@ -250,9 +255,7 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
                 return String(format: "%02d:%02d %@", h12,
                               comps.minute ?? 0, amPm(now))
             case .h24:
-                let f = DateFormatter()
-                f.dateFormat = "EEEE"
-                return f.string(from: now).uppercased()
+                return MatrixTheme.weekday(now)
             }
         }()
         let sw = stringWidth(sub, font: subFont)

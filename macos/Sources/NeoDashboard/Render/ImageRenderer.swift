@@ -22,7 +22,8 @@ final class ImageRenderer: FrameRenderer, @unchecked Sendable {
         self.size = size
     }
 
-    func render(_ telemetry: Telemetry, blink: Double, now: Date) -> CGImage? {
+    func render(_ telemetry: Telemetry, blink: Double, now: Date,
+                blackAlpha: Double = 0) -> CGImage? {
         guard let ctx = CGContext(
             data: nil,
             width: Int(size.width), height: Int(size.height),
@@ -37,40 +38,49 @@ final class ImageRenderer: FrameRenderer, @unchecked Sendable {
         ctx.setFillColor(NSColor.black.cgColor)
         ctx.fill(CGRect(origin: .zero, size: size))
 
-        guard let img = loadImage() else { return ctx.makeImage() }
-
-        // Aspect-fill (cover) — keep the placeholder filling the panel so
-        // the LCD doesn't show black bars.
-        let imgAspect = CGFloat(img.width) / CGFloat(img.height)
-        let canvasAspect = size.width / size.height
-        let drawW: CGFloat
-        let drawH: CGFloat
-        if imgAspect > canvasAspect {
-            drawH = size.height
-            drawW = drawH * imgAspect
-        } else {
-            drawW = size.width
-            drawH = drawW / imgAspect
+        if let img = loadImage() {
+            // Aspect-fill (cover) — keep the placeholder filling the panel
+            // so the LCD doesn't show black bars.
+            let imgAspect = CGFloat(img.width) / CGFloat(img.height)
+            let canvasAspect = size.width / size.height
+            let drawW: CGFloat
+            let drawH: CGFloat
+            if imgAspect > canvasAspect {
+                drawH = size.height
+                drawW = drawH * imgAspect
+            } else {
+                drawW = size.width
+                drawH = drawW / imgAspect
+            }
+            let x = (size.width - drawW) / 2
+            let y = (size.height - drawH) / 2
+            ctx.saveGState()
+            ctx.translateBy(x: x, y: y)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.translateBy(x: 0, y: -drawH)
+            ctx.interpolationQuality = .high
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: drawW, height: drawH))
+            ctx.restoreGState()
         }
-        let x = (size.width - drawW) / 2
-        let y = (size.height - drawH) / 2
 
-        ctx.saveGState()
-        ctx.translateBy(x: x, y: y)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.translateBy(x: 0, y: -drawH)
-        ctx.interpolationQuality = .high
-        ctx.draw(img, in: CGRect(x: 0, y: 0, width: drawW, height: drawH))
-        ctx.restoreGState()
-
+        applyFade(into: ctx, alpha: blackAlpha)
         return ctx.makeImage()
+    }
+
+    /// Translucent black overlay used by FrameLoop's fade transitions.
+    /// No-op when `alpha == 0`.
+    private func applyFade(into ctx: CGContext, alpha: Double) {
+        guard alpha > 0 else { return }
+        ctx.setFillColor(NSColor.black.withAlphaComponent(
+            min(1, max(0, CGFloat(alpha)))).cgColor)
+        ctx.fill(CGRect(origin: .zero, size: size))
     }
 
     /// Themed idle/clock view — dimmed background image with the time
     /// painted in the centre. Keeps the placeholder's visual identity
     /// (Alliance blue, Horde red, Dragon Ball sand, …) while clearly
     /// communicating "no active session".
-    func renderClock(blink: Double, now: Date) -> CGImage? {
+    func renderClock(blink: Double, now: Date, blackAlpha: Double = 0) -> CGImage? {
         guard let ctx = CGContext(
             data: nil,
             width: Int(size.width), height: Int(size.height),
@@ -160,6 +170,7 @@ final class ImageRenderer: FrameRenderer, @unchecked Sendable {
             ctx.restoreGState()
         }
 
+        applyFade(into: ctx, alpha: blackAlpha)
         return ctx.makeImage()
     }
 
