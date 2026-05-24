@@ -144,14 +144,32 @@ final class RainPainter {
     }
 
     /// Paint every visible glyph into a y-flipped context (screen
-    /// coords). Used by both the offscreen cache build and — should we
-    /// ever need to bypass the cache — direct drawing.
+    /// coords). Glyphs are grouped by trail-color index so each color
+    /// is drawn in one `CTFontDrawGlyphs` call instead of one call per
+    /// glyph — eliminating ~2,600 `saveGState/restoreGState/translate/
+    /// scale` cycles on a busy portrait canvas.
+    ///
+    /// Position math: the outer ctx is y-flipped (screen coords).
+    /// `scaleBy(x: 1, y: -1)` once at the start converts the local
+    /// frame to y-up so CTFontDrawGlyphs draws glyphs upright; a
+    /// per-glyph baseline in screen-coord `(col.x, y + 11)` becomes
+    /// `(col.x, -(y + 11))` in that y-up frame.
     private func paintGlyphs(into ctx: CGContext) {
-        ctx.saveGState()
-        ctx.textMatrix = .identity
         let lastTrailIdx = trailColors.count - 1
-        var glyph: CGGlyph = 0
-        let origin = CGPoint.zero
+        // Pre-allocate per-color buckets; reused across runs would be
+        // ideal but `paintGlyphs` runs at the step rate (~12 Hz) so
+        // per-call allocation is fine.
+        var glyphsByColor: [[CGGlyph]] = Array(repeating: [], count: trailColors.count)
+        var posByColor: [[CGPoint]] = Array(repeating: [], count: trailColors.count)
+        // Rough upper bound: every column contributes its full
+        // lengthRows worth of glyphs. Hint capacity so the per-color
+        // arrays don't repeatedly realloc as we append.
+        let estimatedPerColor = max(8, columns.count * 2 / trailColors.count)
+        for i in 0..<trailColors.count {
+            glyphsByColor[i].reserveCapacity(estimatedPerColor)
+            posByColor[i].reserveCapacity(estimatedPerColor)
+        }
+
         for col in columns {
             for j in 0..<col.lengthRows {
                 let row = col.headRow - j
@@ -160,15 +178,25 @@ final class RainPainter {
                 if y > canvasSize.height + glyphHeight { continue }
                 let charKey = col.glyphs[j % col.glyphs.count]
                 guard let gid = glyphIDs[charKey], gid != 0 else { continue }
-                ctx.setFillColor(trailColors[min(j, lastTrailIdx)])
-                ctx.saveGState()
-                ctx.translateBy(x: col.x, y: y + 11)
-                ctx.scaleBy(x: 1, y: -1)
-                glyph = gid
-                withUnsafePointer(to: origin) { ptr in
-                    CTFontDrawGlyphs(font, &glyph, ptr, 1, ctx)
+                let idx = min(j, lastTrailIdx)
+                glyphsByColor[idx].append(gid)
+                posByColor[idx].append(CGPoint(x: col.x, y: -(y + 11)))
+            }
+        }
+
+        ctx.saveGState()
+        ctx.textMatrix = .identity
+        ctx.scaleBy(x: 1, y: -1)
+        for idx in 0..<trailColors.count where !glyphsByColor[idx].isEmpty {
+            ctx.setFillColor(trailColors[idx])
+            let glyphs = glyphsByColor[idx]
+            let positions = posByColor[idx]
+            glyphs.withUnsafeBufferPointer { gPtr in
+                positions.withUnsafeBufferPointer { pPtr in
+                    CTFontDrawGlyphs(font, gPtr.baseAddress!,
+                                     pPtr.baseAddress!,
+                                     glyphs.count, ctx)
                 }
-                ctx.restoreGState()
             }
         }
         ctx.restoreGState()
