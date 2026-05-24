@@ -71,7 +71,7 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     /// date/weather text underneath it would change.
     private func cachedStaticLayer(now: Date) -> CGImage? {
         let dateKey = dateLabel(now: now)
-        let weather = (WeatherService.shared.summary ?? "—").uppercased()
+        let weather = WeatherService.shared.summaryUppercased ?? "—"
         let key = "\(dateKey)|\(weather)"
         if let cached = staticLayer, cached.key == key { return cached.image }
 

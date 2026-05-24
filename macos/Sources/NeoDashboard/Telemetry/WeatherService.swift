@@ -15,6 +15,10 @@ final class WeatherService: @unchecked Sendable {
 
     private struct State {
         var cached: String?
+        /// Pre-uppercased copy of `cached` — renderers display the weather
+        /// in caps and were calling `.uppercased()` every frame. Compute
+        /// it once when `cached` changes.
+        var cachedUpper: String?
         var started = false
         var refreshRequested = false
         /// Last resolved coords + place name. Cached for an hour so we
@@ -53,6 +57,12 @@ final class WeatherService: @unchecked Sendable {
     /// first successful refresh.
     var summary: String? {
         state.withLock { $0.cached }
+    }
+
+    /// Same as `summary` but pre-uppercased — renderers display caps and
+    /// would otherwise recompute the case fold on every frame.
+    var summaryUppercased: String? {
+        state.withLock { $0.cachedUpper }
     }
 
     /// Idempotent — kicks off a detached task that refreshes every 10 min.
@@ -124,7 +134,11 @@ final class WeatherService: @unchecked Sendable {
                 .filter { !$0.isEmpty }
                 .joined(separator: ", ")
             let summary = "\(location) · \(Int(temp.rounded()))\(unit.rawValue) · \(cond)"
-            state.withLock { $0.cached = summary }
+            let upper = summary.uppercased()
+            state.withLock { s in
+                s.cached = summary
+                s.cachedUpper = upper
+            }
             logger.info("weather updated: \(summary, privacy: .public)")
         } catch {
             logger.warning("refresh failed: \(error.localizedDescription, privacy: .public)")

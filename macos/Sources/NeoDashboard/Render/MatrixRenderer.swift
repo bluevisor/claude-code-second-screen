@@ -1086,7 +1086,7 @@ final class MatrixRenderer: @unchecked Sendable {
 
         // Right stats. Weather replaces the legacy UTC-offset chip; until
         // the first network refresh succeeds we show a placeholder.
-        let weatherText = (WeatherService.shared.summary ?? "—").uppercased()
+        let weatherText = WeatherService.shared.summaryUppercased ?? "—"
         let weatherW = stringWidth(weatherText, font: smallFont)
         _ = drawText(ctx, weatherText, font: smallFont, color: MatrixTheme.inkDim,
                      position: CGPoint(x: rect.maxX - weatherW, y: smallTopY))
@@ -1169,7 +1169,7 @@ final class MatrixRenderer: @unchecked Sendable {
             lx += bw + 10
         }
 
-        let weatherText = (WeatherService.shared.summary ?? "—").uppercased()
+        let weatherText = WeatherService.shared.summaryUppercased ?? "—"
         let weatherW = stringWidth(weatherText, font: smallFont)
         // Clamp weather to whatever space the stats left so it never
         // collides — elide before drawing if necessary.
