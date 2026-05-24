@@ -851,12 +851,75 @@ final class MatrixRenderer: @unchecked Sendable {
         } else {
             resourceName = "openai-logo"
         }
-        guard let img = Self.badgeImage(named: resourceName) else { return }
+        if let img = Self.badgeImage(named: resourceName) {
+            ctx.saveGState()
+            ctx.translateBy(x: rect.minX, y: rect.minY)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.translateBy(x: 0, y: -rect.height)
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: rect.width, height: rect.height))
+            ctx.restoreGState()
+            return
+        }
+        // Procedural fallback — used for `google` when no PNG is bundled.
+        // Draws the four-color Google "G" mark from CG primitives so the
+        // badge slot doesn't render blank.
+        if provider == "google" {
+            drawGoogleGBadge(into: ctx, rect: rect)
+        }
+    }
+
+    /// Render a simplified Google "G" mark in the brand quadrant colors.
+    /// Filled ring with the right-middle quadrant cut by a horizontal bar
+    /// to suggest the G crossbar. Not a pixel-exact reproduction of the
+    /// official logo — recognisable enough as a Gemini/Google indicator.
+    private func drawGoogleGBadge(into ctx: CGContext, rect: CGRect) {
+        let cx = rect.midX
+        let cy = rect.midY
+        let outerR = min(rect.width, rect.height) / 2 * 0.92
+        let strokeW = outerR * 0.30
+        let innerR = outerR - strokeW
+
+        // Brand quadrant colors. Using the published Material/Google
+        // palette so the indicator reads as the canonical G mark even
+        // without the exact letter form.
+        let blue   = NSColor(srgbRed: 66/255.0,  green: 133/255.0, blue: 244/255.0, alpha: 1).cgColor
+        let red    = NSColor(srgbRed: 234/255.0, green:  67/255.0, blue:  53/255.0, alpha: 1).cgColor
+        let yellow = NSColor(srgbRed: 251/255.0, green: 188/255.0, blue:   4/255.0, alpha: 1).cgColor
+        let green  = NSColor(srgbRed:  52/255.0, green: 168/255.0, blue:  83/255.0, alpha: 1).cgColor
+
+        // Y-axis is flipped (screen coords) — angles in CG are CCW in y-up,
+        // so in our frame "positive sweep" reads as clockwise. We draw four
+        // colored arcs each spanning ~90°, leaving a notch on the right for
+        // the G crossbar and a horizontal slot cut from the center outward.
+        let quadrants: [(CGFloat, CGFloat, CGColor)] = [
+            // Start, end (radians, CG convention), color.
+            (-.pi / 2,  0,           blue),    // top → right (≈ blue band)
+            (.pi,      -.pi / 2,     red),     // left → top (≈ red band)
+            (.pi / 2,  .pi,          yellow),  // bottom → left (≈ yellow band)
+            (0,        .pi / 2,      green),   // right → bottom (≈ green band)
+        ]
+        for (start, end, color) in quadrants {
+            ctx.saveGState()
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: cx + cos(start) * innerR,
+                                 y: cy + sin(start) * innerR))
+            ctx.addArc(center: CGPoint(x: cx, y: cy), radius: outerR,
+                       startAngle: start, endAngle: end, clockwise: false)
+            ctx.addArc(center: CGPoint(x: cx, y: cy), radius: innerR,
+                       startAngle: end, endAngle: start, clockwise: true)
+            ctx.closePath()
+            ctx.setFillColor(color)
+            ctx.fillPath()
+            ctx.restoreGState()
+        }
+
+        // Crossbar slot — punch a horizontal channel from the center out
+        // through the right side so the ring reads as a "G".
+        let barH = strokeW * 0.85
         ctx.saveGState()
-        ctx.translateBy(x: rect.minX, y: rect.minY)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.translateBy(x: 0, y: -rect.height)
-        ctx.draw(img, in: CGRect(x: 0, y: 0, width: rect.width, height: rect.height))
+        ctx.setBlendMode(.clear)
+        ctx.fill(CGRect(x: cx, y: cy - barH / 2,
+                        width: outerR + 2, height: barH))
         ctx.restoreGState()
     }
 

@@ -310,11 +310,24 @@ final class CodexSource: TelemetrySource {
                     lastContextUsed = doubleValue(last["total_tokens"])
                 } else if (ev.payload["type"] as? String) == "user_message",
                           let msg = ev.payload["message"] as? String {
+                    // Antigravity stamps a `<USER_SETTINGS_CHANGE>The user
+                    // changed setting `Model Selection` from None to <NAME>.
+                    // <next sentence>` block into the first user message of
+                    // each transcript. Extract <NAME> by looking for the
+                    // sentence boundary (". " — period + space), not the
+                    // first `.`, because model names like "Gemini 3.5 Flash
+                    // (Medium)" contain decimals that would otherwise
+                    // truncate the name to "Gemini 3".
                     if let range = msg.range(of: "Model Selection` from "),
-                       let toRange = msg[range.upperBound...].range(of: " to "),
-                       let endRange = msg[toRange.upperBound...].range(of: ".") {
-                        let modelPart = String(msg[toRange.upperBound..<endRange.lowerBound])
-                        modelID = modelPart
+                       let toRange = msg[range.upperBound...].range(of: " to ") {
+                        let tail = msg[toRange.upperBound...]
+                        let endRange = tail.range(of: ". ")
+                            ?? tail.range(of: ".\n")
+                            ?? tail.range(of: ".")
+                        if let endRange {
+                            let modelPart = String(tail[tail.startIndex..<endRange.lowerBound])
+                            modelID = modelPart
+                        }
                     }
                 }
             }
@@ -384,6 +397,7 @@ final class CodexSource: TelemetrySource {
         let started = codexISOToDate(startedAt) ?? .now
         let thinking = codexReasoningEffort(events)
             ?? configuredReasoningEffort(cwd: cwd)
+            ?? modelSpec.thinkingLevel
 
         let agent = Agent(
             kind: kind.rawValue,
@@ -1024,6 +1038,11 @@ private struct CodexModelSpec {
     let pricingIn: Double
     let pricingOut: Double
     let provider: String
+    /// Thinking/reasoning level baked into the model name (e.g. the
+    /// "(Medium)" suffix on Antigravity model selections). Used as a
+    /// fallback for the thinking indicator when the source doesn't
+    /// emit explicit `reasoning_effort` events.
+    let thinkingLevel: String?
 }
 
 private struct CodexPricing {
@@ -1048,6 +1067,18 @@ private func parseCodexModelID(_ id: String, observedContextMax: Double) -> Code
     let contextMax = observedContextMax > 0 ? observedContextMax : pricing.contextMax
 
     let version = firstNumber(in: raw) ?? "?"
+    // Pull "(Medium)" / "(High)" / "(Low)" off the tail — Antigravity
+    // model selections come through as "Gemini 3.5 Flash (Medium)". The
+    // parens content is the thinking-effort level, surfaced separately
+    // on the model card so the name itself stays clean.
+    let thinkingLevel: String? = {
+        guard let open = raw.lastIndex(of: "("),
+              let close = raw.lastIndex(of: ")"),
+              open < close else { return nil }
+        let inside = raw[raw.index(after: open)..<close]
+            .trimmingCharacters(in: .whitespaces)
+        return inside.isEmpty ? nil : inside
+    }()
     let name: String
     let provider: String
 
@@ -1076,7 +1107,7 @@ private func parseCodexModelID(_ id: String, observedContextMax: Double) -> Code
 
     return CodexModelSpec(name: name, version: version, contextMax: contextMax,
                           pricingIn: pricing.pricingIn, pricingOut: pricing.pricingOut,
-                          provider: provider)
+                          provider: provider, thinkingLevel: thinkingLevel)
 }
 
 private func firstNumber(in s: String) -> String? {
