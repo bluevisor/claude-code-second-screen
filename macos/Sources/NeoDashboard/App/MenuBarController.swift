@@ -19,12 +19,18 @@ final class MenuBarController: NSObject {
     }
 
     private func configure() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
-            let image = NSImage(systemSymbolName: "display", accessibilityDescription: "NeoDashboard")
-            image?.isTemplate = true
-            button.image = image
-            button.imagePosition = .imageOnly
+            if let image = statusImage() {
+                button.image = image
+                button.title = ""
+                button.imagePosition = .imageOnly
+            } else {
+                button.image = nil
+                button.title = "ND"
+                button.font = .monospacedSystemFont(ofSize: 11, weight: .bold)
+                button.imagePosition = .noImage
+            }
             button.toolTip = "NeoDashboard"
             button.target = self
             button.action = #selector(togglePopover(_:))
@@ -40,6 +46,18 @@ final class MenuBarController: NSObject {
         p.behavior = .transient
         p.animates = true
         self.popover = p
+    }
+
+    private func statusImage() -> NSImage? {
+        let names = ["rectangle.3.group", "display", "desktopcomputer"]
+        for name in names {
+            guard let image = NSImage(systemSymbolName: name,
+                                      accessibilityDescription: "NeoDashboard") else { continue }
+            image.isTemplate = true
+            image.size = NSSize(width: 18, height: 18)
+            return image
+        }
+        return nil
     }
 
     @objc private func togglePopover(_ sender: Any?) {

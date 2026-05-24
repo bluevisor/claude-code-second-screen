@@ -112,12 +112,23 @@ final class FrameLoop {
         // Drive the fade state machine on the main actor before handing the
         // result off to the work queue. The active renderer + black overlay
         // alpha are decided here so the worker doesn't touch shared state.
-        let (activeRenderer, blackAlpha) = stepFade(wantsClock: !tel.hasContent, now: now)
+        let wantsClock = !tel.hasContent || env.forceClock
+        let (clockMode, blackAlpha) = stepFade(wantsClock: wantsClock, now: now)
+        let activeRenderer = self.renderer
 
         workQueue.async { [weak self] in
             guard let self else { return }
             defer { self.renderInFlight.withLock { $0 = false } }
-            guard let base = activeRenderer.render(tel, blink: phase, now: now) else { return }
+            let base: CGImage?
+            if clockMode {
+                // Prefer the active renderer's themed clock; fall back to
+                // the generic phosphor one if it doesn't override.
+                base = activeRenderer.renderClock(blink: phase, now: now)
+                    ?? self.clockRenderer.render(tel, blink: phase, now: now)
+            } else {
+                base = activeRenderer.render(tel, blink: phase, now: now)
+            }
+            guard let base else { return }
             let raw = Self.applyBlackOverlay(base, alpha: blackAlpha) ?? base
             // LCD gets the oriented frame; preview stays in the native
             // landscape so the user can still read it on screen.
@@ -135,12 +146,10 @@ final class FrameLoop {
         }
     }
 
-    /// Drives the dashboard↔clock fade machine. Returns the renderer that
-    /// should produce the next frame and the black-overlay alpha to apply
-    /// on top of it (0 = full image, 1 = pure black).
-    private func stepFade(wantsClock: Bool, now: Date)
-        -> (FrameRenderer, Double)
-    {
+    /// Drives the dashboard↔clock fade machine. Returns whether the next
+    /// frame should be drawn in clock mode (vs the regular dashboard) and
+    /// the black-overlay alpha to apply (0 = full image, 1 = pure black).
+    private func stepFade(wantsClock: Bool, now: Date) -> (Bool, Double) {
         switch fadeState {
         case .idle:
             if wantsClock != currentIsClock {
@@ -151,18 +160,18 @@ final class FrameLoop {
             if progress >= 1 {
                 currentIsClock = wantsClock
                 fadeState = .fadingIn(start: now)
-                return (currentIsClock ? clockRenderer : renderer, 1)
+                return (currentIsClock, 1)
             }
-            return (currentIsClock ? clockRenderer : renderer, progress)
+            return (currentIsClock, progress)
         case .fadingIn(let start):
             let progress = min(1, now.timeIntervalSince(start) / Self.fadeDuration)
             if progress >= 1 {
                 fadeState = .idle
-                return (currentIsClock ? clockRenderer : renderer, 0)
+                return (currentIsClock, 0)
             }
-            return (currentIsClock ? clockRenderer : renderer, 1 - progress)
+            return (currentIsClock, 1 - progress)
         }
-        return (currentIsClock ? clockRenderer : renderer, 0)
+        return (currentIsClock, 0)
     }
 
     /// Composite a black rectangle of the given alpha over the source —

@@ -430,11 +430,14 @@ final class MatrixRenderer {
         let nw = drawText(ctx, nameDisp, font: nameFont, color: MatrixTheme.ink,
                           position: CGPoint(x: cx, y: cy))
         // Pill rectangle.
+        let vPill = CGRect(x: cx + nw + 8, y: cy + 8, width: vPillW, height: 18)
         ctx.setFillColor(MatrixTheme.phosphor.cgColor)
-        ctx.fill(CGRect(x: cx + nw + 8, y: cy + 8, width: vPillW, height: 18))
+        ctx.fill(vPill)
         _ = drawText(ctx, vText, font: vFont,
                      color: NSColor(srgbRed: 2/255.0, green: 24/255.0, blue: 15/255.0, alpha: 1),
-                     position: CGPoint(x: cx + nw + 8 + 7, y: cy + 8 + 3))
+                     position: capTopOrigin(rowMid: vPill.midY,
+                                            font: vFont,
+                                            x: vPill.minX + 7))
         cy += 32
 
         // P50 / P95.
@@ -637,11 +640,14 @@ final class MatrixRenderer {
         let planFont = MatrixTheme.font(10, weight: .bold)
         let pw = stringWidth(q.plan, font: planFont) + 16
         let ph: CGFloat = 18
+        let planPill = CGRect(x: rect.maxX - 16 - pw, y: cy, width: pw, height: ph)
         ctx.setFillColor(MatrixTheme.phosphor.cgColor)
-        ctx.fill(CGRect(x: rect.maxX - 16 - pw, y: cy, width: pw, height: ph))
+        ctx.fill(planPill)
         _ = drawText(ctx, q.plan, font: planFont,
                      color: NSColor(srgbRed: 2/255.0, green: 20/255.0, blue: 13/255.0, alpha: 1),
-                     position: CGPoint(x: rect.maxX - 16 - pw + 8, y: cy + 3))
+                     position: capTopOrigin(rowMid: planPill.midY,
+                                            font: planFont,
+                                            x: planPill.minX + 8))
         cy += 24
 
         let showCost = !MatrixTheme.isSubscriptionPlan(q.plan)

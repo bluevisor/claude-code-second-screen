@@ -108,6 +108,88 @@ final class AnimalCrossingRenderer: FrameRenderer {
         return ctx.makeImage()
     }
 
+    /// Themed idle/clock view — keeps the wood plank backdrop and the
+    /// cream paper card, swapping the body for a huge rounded HH:MM.
+    func renderClock(blink: Double, now: Date) -> CGImage? {
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        ctx.translateBy(x: 0, y: size.height)
+        ctx.scaleBy(x: 1, y: -1)
+
+        let hour = Calendar.current.component(.hour, from: now)
+        let palette = Palette.forHour(hour)
+
+        drawWoodPlanks(ctx, palette: palette)
+        drawScatter(ctx, palette: palette, phase: blink)
+
+        let margin: CGFloat = 18
+        let cardRect = CGRect(x: margin, y: margin,
+                              width: size.width - 2 * margin,
+                              height: size.height - 2 * margin)
+        drawPaperCard(ctx, rect: cardRect, palette: palette)
+        drawCornerStars(ctx, rect: cardRect, palette: palette)
+
+        let pad: CGFloat = 22
+        let inner = cardRect.insetBy(dx: pad, dy: pad)
+
+        // Header strip — same as the main dashboard.
+        let headerH: CGFloat = 60
+        let headerRect = CGRect(x: inner.minX, y: inner.minY,
+                                width: inner.width, height: headerH)
+        drawHeader(ctx, rect: headerRect, palette: palette, now: now,
+                   hour: hour, tel: .empty())
+        drawDottedDivider(ctx,
+                          from: CGPoint(x: inner.minX, y: headerRect.maxY + 8),
+                          to:   CGPoint(x: inner.maxX, y: headerRect.maxY + 8),
+                          color: palette.dim)
+
+        // Big clock filling the body.
+        let cal = Calendar(identifier: .gregorian)
+        let comps = cal.dateComponents([.hour, .minute, .second], from: now)
+        let h12 = ((comps.hour ?? 0) + 11) % 12 + 1
+        let mm = String(format: "%02d", comps.minute ?? 0)
+        let blinkOn = (comps.second ?? 0).isMultiple(of: 2)
+        let clockText = "\(h12):\(mm)"
+
+        let clockFont = roundedFont(160, weight: .heavy)
+        // Keep the colon in the layout always; toggle its colour to clear
+        // when the blink is off so the digits don't shift.
+        let attr = NSMutableAttributedString(
+            string: clockText,
+            attributes: [.font: clockFont, .foregroundColor: palette.text])
+        if !blinkOn, let r = clockText.range(of: ":") {
+            attr.addAttribute(.foregroundColor, value: NSColor.clear,
+                              range: NSRange(r, in: clockText))
+        }
+        let line = CTLineCreateWithAttributedString(attr)
+        let bounds = CTLineGetBoundsWithOptions(line, .useOpticalBounds)
+        let bodyMid = (headerRect.maxY + inner.maxY) / 2
+        let baselineY = bodyMid + (bounds.origin.y + bounds.height / 2)
+        let x = (size.width - bounds.width) / 2
+        ctx.saveGState()
+        ctx.textMatrix = .identity
+        ctx.translateBy(x: x, y: baselineY)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.textPosition = .zero
+        CTLineDraw(line, ctx)
+        ctx.restoreGState()
+
+        // "Napping" tag under the clock, AC-style.
+        let napFont = roundedFont(18, weight: .semibold)
+        let nap = "💤  taking a nap"
+        let napW = textWidth(nap, font: napFont)
+        textBaselineMid(ctx, nap, font: napFont, color: palette.dim,
+                        x: size.width / 2 - napW / 2, midY: bodyMid + 110)
+
+        return ctx.makeImage()
+    }
+
     // MARK: - Backdrop
 
     private func drawWoodPlanks(_ ctx: CGContext, palette: Palette) {

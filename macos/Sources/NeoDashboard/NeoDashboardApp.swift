@@ -29,9 +29,23 @@ struct NeoDashboardApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController?
+    private var didStart = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        guard let env = AppEnvironment.shared else { return }
+        startWhenEnvironmentIsReady()
+    }
+
+    private func startWhenEnvironmentIsReady(attempt: Int = 0) {
+        guard !didStart else { return }
+        guard let env = AppEnvironment.shared else {
+            if attempt < 20 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.startWhenEnvironmentIsReady(attempt: attempt + 1)
+                }
+            }
+            return
+        }
+        didStart = true
         menuBar = MenuBarController(env: env)
         env.start()
     }

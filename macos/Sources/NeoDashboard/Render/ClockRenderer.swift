@@ -14,6 +14,11 @@ final class ClockRenderer: FrameRenderer {
     private let rain: RainPainter
     private let showRain: Bool
     private let crt = CRTPostProcessor()
+    /// Cached layer that holds every element that doesn't change between
+    /// most frames — gradient, corner brackets, top strip date, bottom
+    /// strip weather, status pill. Invalidated when `date` or `weather`
+    /// strings change (~minutely and ~10 min respectively).
+    private var staticLayer: (key: String, image: CGImage)?
 
     init(size: CGSize = MatrixTheme.canvasSize, showRain: Bool = true) {
         self.size = size
@@ -33,21 +38,55 @@ final class ClockRenderer: FrameRenderer {
         ctx.translateBy(x: 0, y: size.height)
         ctx.scaleBy(x: 1, y: -1)
 
-        drawBackground(into: ctx, now: now)
-        drawCornerBrackets(into: ctx)
-        drawTopStrip(into: ctx, now: now)
-        drawClock(into: ctx, now: now, blink: blink)
-        drawBottomStrip(into: ctx)
+        // Lay down the cached static layer first — gradient, brackets,
+        // date/weather strips. Cheap rect blit replaces 4–6 ms of draws.
+        if let cached = cachedStaticLayer(now: now) {
+            // `ctx` is already y-flipped for our screen-coord helpers, so
+            // a naive `ctx.draw(image, in:)` would render the cache
+            // upside-down. Flip once more locally to land it upright.
+            ctx.saveGState()
+            ctx.translateBy(x: 0, y: size.height)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.draw(cached, in: CGRect(origin: .zero, size: size))
+            ctx.restoreGState()
+        }
+        // Rain animates, so draw it per-frame on top of the static layer.
+        if showRain {
+            rain.draw(into: ctx, now: now.timeIntervalSinceReferenceDate)
+        }
+        // Scanlines darken the backdrop + rain only — drawing the clock
+        // digits after the scanline pass keeps the huge HH:MM glyphs from
+        // being striped (matrix dashboard's smaller text still reads fine
+        // with scanlines on top, but the clock face benefits from a clean
+        // unbroken silhouette).
         drawScanlines(into: ctx, opacity: 0.78)
+        drawClock(into: ctx, now: now, blink: blink)
         drawVignette(into: ctx, strength: 0.42)
 
         guard let raw = ctx.makeImage() else { return nil }
         return crt.process(raw) ?? raw
     }
 
-    // MARK: - Background
+    /// Returns the cached background layer, rebuilding only when the
+    /// date/weather text underneath it would change.
+    private func cachedStaticLayer(now: Date) -> CGImage? {
+        let dateKey = dateLabel(now: now)
+        let weather = (WeatherService.shared.summary ?? "—").uppercased()
+        let key = "\(dateKey)|\(weather)"
+        if let cached = staticLayer, cached.key == key { return cached.image }
 
-    private func drawBackground(into ctx: CGContext, now: Date) {
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        ctx.translateBy(x: 0, y: size.height)
+        ctx.scaleBy(x: 1, y: -1)
+
+        // Bake the same paint order minus the per-frame layers.
         let grad = CGGradient(colorsSpace: colorSpace,
             colors: [MatrixTheme.bgTop.cgColor, MatrixTheme.bgBot.cgColor] as CFArray,
             locations: [0, 1])!
@@ -55,10 +94,28 @@ final class ClockRenderer: FrameRenderer {
                                start: CGPoint(x: 0, y: 0),
                                end: CGPoint(x: 0, y: size.height),
                                options: [])
-        if showRain {
-            rain.draw(into: ctx, now: now.timeIntervalSinceReferenceDate)
-        }
+        drawCornerBrackets(into: ctx)
+        drawTopStrip(into: ctx, dateLabel: dateKey)
+        drawBottomStrip(into: ctx, weather: weather)
+
+        guard let img = ctx.makeImage() else { return nil }
+        staticLayer = (key, img)
+        return img
     }
+
+    private func dateLabel(now: Date) -> String {
+        let cal = Calendar(identifier: .gregorian)
+        let comps = cal.dateComponents([.weekday, .day, .month, .year], from: now)
+        let weekday: String = {
+            let f = DateFormatter()
+            f.dateFormat = "EEEE"
+            return f.string(from: now).uppercased()
+        }()
+        return String(format: "%@  %02d.%02d.%04d", weekday,
+                      comps.month ?? 0, comps.day ?? 0, comps.year ?? 0)
+    }
+
+    // MARK: - Background
 
     private func drawCornerBrackets(into ctx: CGContext) {
         let inset: CGFloat = 18
@@ -93,16 +150,7 @@ final class ClockRenderer: FrameRenderer {
 
     // MARK: - Strips
 
-    private func drawTopStrip(into ctx: CGContext, now: Date) {
-        let cal = Calendar(identifier: .gregorian)
-        let comps = cal.dateComponents([.weekday, .day, .month, .year], from: now)
-        let weekday: String = {
-            let f = DateFormatter()
-            f.dateFormat = "EEEE"
-            return f.string(from: now).uppercased()
-        }()
-        let dateText = String(format: "%@  %02d.%02d.%04d", weekday,
-                              comps.month ?? 0, comps.day ?? 0, comps.year ?? 0)
+    private func drawTopStrip(into ctx: CGContext, dateLabel: String) {
         let font = MatrixTheme.font(13, weight: .bold)
         let y: CGFloat = 32
         // Status pill on the left.
@@ -116,13 +164,12 @@ final class ClockRenderer: FrameRenderer {
         _ = drawText(ctx, status, font: statusFont, color: MatrixTheme.amber,
                      position: CGPoint(x: pillRect.minX + 8, y: pillRect.minY + 3))
         // Date right-aligned.
-        let dw = stringWidth(dateText, font: font)
-        _ = drawText(ctx, dateText, font: font, color: MatrixTheme.inkDim,
+        let dw = stringWidth(dateLabel, font: font)
+        _ = drawText(ctx, dateLabel, font: font, color: MatrixTheme.inkDim,
                      position: CGPoint(x: size.width - 36 - dw, y: y))
     }
 
-    private func drawBottomStrip(into ctx: CGContext) {
-        let weather = (WeatherService.shared.summary ?? "—").uppercased()
+    private func drawBottomStrip(into ctx: CGContext, weather: String) {
         let font = MatrixTheme.font(13)
         let y = size.height - 38
         // Tag at left
@@ -152,6 +199,7 @@ final class ClockRenderer: FrameRenderer {
         let widths = parts.map { stringWidth($0, font: bigFont) }
         let total = widths.reduce(0, +)
         var x = (size.width - total) / 2
+        let digitLeft = x
 
         // Vertically centre using tight cap bounds — keeps the digits
         // visually centred without descender drift.
@@ -167,6 +215,10 @@ final class ClockRenderer: FrameRenderer {
                          position: CGPoint(x: x, y: topY))
             x += w
         }
+        drawDigitScanlines(into: ctx,
+                           rect: CGRect(x: digitLeft, y: topY,
+                                        width: total,
+                                        height: bigFont.ascender - bigFont.descender))
 
         // Secondary label below the clock.
         let cal12 = ((comps.hour ?? 0) + 11) % 12 + 1
@@ -188,6 +240,23 @@ final class ClockRenderer: FrameRenderer {
         while y < size.height {
             ctx.fill(CGRect(x: 0, y: y, width: size.width, height: 1))
             y += 2
+        }
+        ctx.restoreGState()
+    }
+
+    private func drawDigitScanlines(into ctx: CGContext, rect: CGRect) {
+        let clipped = rect.intersection(CGRect(origin: .zero, size: size))
+        guard !clipped.isNull, clipped.width > 0, clipped.height > 0 else { return }
+        ctx.saveGState()
+        ctx.addRect(clipped)
+        ctx.clip()
+        ctx.setShouldAntialias(false)
+        ctx.setBlendMode(.normal)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.34).cgColor)
+        var y = floor(clipped.minY / 6) * 6
+        while y < clipped.maxY {
+            ctx.fill(CGRect(x: clipped.minX, y: y, width: clipped.width, height: 2))
+            y += 6
         }
         ctx.restoreGState()
     }

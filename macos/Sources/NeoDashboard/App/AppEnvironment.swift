@@ -69,8 +69,10 @@ final class AppEnvironment: ObservableObject {
     enum RenderMode: String, CaseIterable, Identifiable {
         case matrixDashboard = "Matrix"
         case cozy = "Cozy"
-        case wow = "WoW"
+        case wowAlliance = "WoW Alliance"
+        case wowHorde = "WoW Horde"
         case animalCrossing = "Animal Crossing"
+        case dragonball = "Dragon Ball"
         var id: String { rawValue }
     }
 
@@ -85,6 +87,11 @@ final class AppEnvironment: ObservableObject {
     @Published var flipHorizontal: Bool { didSet { Defaults.flipHorizontal = flipHorizontal } }
     @Published var flipVertical: Bool { didSet { Defaults.flipVertical = flipVertical } }
     @Published var mode: RenderMode { didSet { Defaults.mode = mode.rawValue } }
+    /// Manual override — when true the LCD shows the clock regardless of
+    /// whether the active source has telemetry. The clock fallback still
+    /// auto-engages when telemetry is absent, this just lets the user pin
+    /// it on (e.g. for an ambient desk look while keeping a busy session).
+    @Published var forceClock: Bool { didSet { Defaults.forceClock = forceClock } }
 
     /// LCD push is always on while the app runs — the device is the whole
     /// point of the program. Exposed as a constant so call sites that used
@@ -137,6 +144,7 @@ final class AppEnvironment: ObservableObject {
         self.flipHorizontal = Defaults.flipHorizontal
         self.flipVertical = Defaults.flipVertical
         self.mode = RenderMode(rawValue: Defaults.mode) ?? .matrixDashboard
+        self.forceClock = Defaults.forceClock
         AppEnvironment.shared = self
     }
 
@@ -221,6 +229,10 @@ private enum Defaults {
     static var flipHorizontal: Bool {
         get { d.object(forKey: "flipHorizontal") as? Bool ?? false }
         set { d.set(newValue, forKey: "flipHorizontal") }
+    }
+    static var forceClock: Bool {
+        get { d.object(forKey: "forceClock") as? Bool ?? false }
+        set { d.set(newValue, forKey: "forceClock") }
     }
     static var flipVertical: Bool {
         get { d.object(forKey: "flipVertical") as? Bool ?? false }

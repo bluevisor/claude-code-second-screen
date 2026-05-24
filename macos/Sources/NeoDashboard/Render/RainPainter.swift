@@ -25,10 +25,34 @@ final class RainPainter {
         "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ" +
             "0123456789ABCDEFXYZ"
     )
+    /// One CTLine per glyph, baked once at init. The line carries no
+    /// foreground color attribute so `CTLineDraw` picks up whatever
+    /// `ctx.setFillColor` set just before — letting us vary trail alpha
+    /// per row without rebuilding ~1.7k attributed strings per frame.
+    private let glyphLines: [Character: CTLine]
+    /// Pre-baked trail-alpha colors keyed by row offset from the head.
+    private let trailColors: [CGColor]
 
     init(canvasSize: CGSize = MatrixTheme.canvasSize, stepHz: Double = 12) {
         self.canvasSize = canvasSize
         self.stepInterval = 1.0 / max(1, stepHz)
+        // Bake one CTLine per glyph using the rain font without any
+        // foreground-color attribute, so CTLineDraw picks up the current
+        // ctx fill color and we can vary alpha cheaply per row.
+        let font = MatrixTheme.font(11, weight: .medium)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        var lines: [Character: CTLine] = [:]
+        for c in glyphAlphabet {
+            let s = NSAttributedString(string: String(c), attributes: attrs)
+            lines[c] = CTLineCreateWithAttributedString(s)
+        }
+        self.glyphLines = lines
+        // 25 alpha levels covers any realistic trail length.
+        self.trailColors = (0..<25).map { j -> CGColor in
+            let alpha: CGFloat = j == 0 ? 0.9
+                : max(0.05, 0.5 - CGFloat(j) * 0.045)
+            return MatrixTheme.phosphor.withAlphaComponent(alpha).cgColor
+        }
         let colCount = Int(canvasSize.width / glyphWidth)
         columns = (0..<colCount).map { i in
             Column(x: CGFloat(i) * glyphWidth,
@@ -46,25 +70,26 @@ final class RainPainter {
             lastStep = now
         }
         ctx.saveGState()
-        let phosphor = MatrixTheme.phosphor.cgColor
-        let font = MatrixTheme.font(11, weight: .medium)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-        ]
+        ctx.textMatrix = .identity
+        // Flip once for the whole pass: each glyph draws at (x, baseline)
+        // in the flipped frame, then we translate per-glyph.
+        let lastTrailIdx = trailColors.count - 1
         for col in columns {
+            let xPhase = Int(col.x.truncatingRemainder(dividingBy: 7))
             for j in 0..<col.lengthRows {
                 let row = col.headRow - j
                 if row < 0 { continue }
                 let y = CGFloat(row) * glyphHeight
                 if y > canvasSize.height + glyphHeight { continue }
-                // Head glyph is bright; trail fades.
-                let alpha: CGFloat = j == 0 ? 0.9 : max(0.05, 0.5 - CGFloat(j) * 0.045)
-                let color = phosphor.copy(alpha: alpha) ?? phosphor
-                let glyph = col.glyphs[(row + Int(col.x.truncatingRemainder(dividingBy: 7))) % col.glyphs.count]
-                let s = NSAttributedString(string: String(glyph),
-                    attributes: attrs.merging([.foregroundColor: NSColor(cgColor: color) ?? .green]) { $1 })
-                // CG y-axis is flipped here — caller is in canvas coords.
-                drawString(s, at: CGPoint(x: col.x, y: y), in: ctx)
+                let glyph = col.glyphs[(row + xPhase) % col.glyphs.count]
+                guard let line = glyphLines[glyph] else { continue }
+                ctx.setFillColor(trailColors[min(j, lastTrailIdx)])
+                ctx.saveGState()
+                ctx.translateBy(x: col.x, y: y + 11)
+                ctx.scaleBy(x: 1, y: -1)
+                ctx.textPosition = .zero
+                CTLineDraw(line, ctx)
+                ctx.restoreGState()
             }
         }
         ctx.restoreGState()
