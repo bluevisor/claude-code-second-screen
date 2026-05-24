@@ -22,6 +22,12 @@ final class RainPainter {
     private var columns: [Column] = []
     private var lastStep: TimeInterval = 0
     private let stepInterval: TimeInterval
+    /// Cached rendering of the current column state. Reused for every
+    /// frame between `step()` calls — at the default 12 Hz step rate
+    /// and 30 fps draw rate that's ~60% of frames served from the
+    /// cache. Invalidated by setting to `nil` inside `step()`.
+    private var cachedFrame: CGImage?
+    private let colorSpace = CGColorSpaceCreateDeviceRGB()
     /// Half-width katakana (U+FF61–U+FF9F block) rather than full-width
     /// kana. Full-width katakana render roughly twice as wide as the ASCII
     /// digits, so columns mixing the two no longer lined up on the fixed
@@ -101,8 +107,46 @@ final class RainPainter {
     func draw(into ctx: CGContext, now: TimeInterval) {
         if now - lastStep >= stepInterval {
             step()
+            cachedFrame = nil
             lastStep = now
         }
+        // Reuse the cache when the column state hasn't changed since the
+        // last step — same pixels, no glyph drawing. ctx is y-flipped
+        // (screen coords); the cache is rendered in the same flipped
+        // frame, so we counter-flip locally to stamp it upright.
+        if cachedFrame == nil { cachedFrame = renderCache() }
+        guard let img = cachedFrame else { return }
+        ctx.saveGState()
+        ctx.translateBy(x: 0, y: canvasSize.height)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(img, in: CGRect(x: 0, y: 0,
+                                 width: canvasSize.width,
+                                 height: canvasSize.height))
+        ctx.restoreGState()
+    }
+
+    /// Builds a fresh cache image of the current column state. The
+    /// offscreen context applies the same y-flip the main render ctx
+    /// has so the inner glyph-paint code keeps using screen coords.
+    private func renderCache() -> CGImage? {
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(canvasSize.width), height: Int(canvasSize.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        ctx.translateBy(x: 0, y: canvasSize.height)
+        ctx.scaleBy(x: 1, y: -1)
+        paintGlyphs(into: ctx)
+        return ctx.makeImage()
+    }
+
+    /// Paint every visible glyph into a y-flipped context (screen
+    /// coords). Used by both the offscreen cache build and — should we
+    /// ever need to bypass the cache — direct drawing.
+    private func paintGlyphs(into ctx: CGContext) {
         ctx.saveGState()
         ctx.textMatrix = .identity
         let lastTrailIdx = trailColors.count - 1
