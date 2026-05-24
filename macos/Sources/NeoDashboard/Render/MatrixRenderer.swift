@@ -24,6 +24,10 @@ final class MatrixRenderer: @unchecked Sendable {
     /// Barrel + chromatic-aberration pass applied as a final post-process.
     private let crt = CRTPostProcessor()
 
+    /// Portrait when the canvas is taller than it is wide — triggers the
+    /// vertical-stack layout used on 90°/270° rotations.
+    private var isPortrait: Bool { size.height > size.width }
+
     init(size: CGSize = MatrixTheme.canvasSize,
          showRain: Bool = true,
          rainFPS: Double = 12) {
@@ -53,6 +57,25 @@ final class MatrixRenderer: @unchecked Sendable {
 
         drawBackground(into: ctx, now: now)
 
+        if isPortrait {
+            layoutPortrait(into: ctx, tel: tel, blink: blink, now: now)
+        } else {
+            layoutLandscape(into: ctx, tel: tel, blink: blink, now: now)
+        }
+
+        drawScanlines(into: ctx, opacity: 0.78)
+        drawVignette(into: ctx, strength: 0.42)
+
+        guard let raw = ctx.makeImage() else { return nil }
+        return crt.process(raw) ?? raw
+    }
+
+    // MARK: - Layouts
+
+    /// Original 1280×480 layout — rail on top, three columns underneath
+    /// (agent · model · quota+subs), footer with center clock.
+    private func layoutLandscape(into ctx: CGContext, tel: Telemetry,
+                                 blink: Double, now: Date) {
         // 18 px outer padding; rail 34; gaps 10/8; footer 38.
         let padX: CGFloat = 18
         let padTop: CGFloat = 12
@@ -93,12 +116,62 @@ final class MatrixRenderer: @unchecked Sendable {
         drawPanel(ctx, rect: subsRect)
         drawSubAgentsPanel(into: ctx, rect: subsRect, tel: tel)
         drawFooter(into: ctx, rect: footerRect, tel: tel, now: now)
+    }
 
-        drawScanlines(into: ctx, opacity: 0.78)
-        drawVignette(into: ctx, strength: 0.42)
+    /// Vertical 480×1280 layout used when the LCD is rotated 90°/270°.
+    /// Panels stack top-to-bottom: rail → agent → model → quota →
+    /// sub-agents → footer. Two-row rail/footer accommodate the narrow
+    /// width — content that fit in one line at 1280 needs to wrap here.
+    private func layoutPortrait(into ctx: CGContext, tel: Telemetry,
+                                blink: Double, now: Date) {
+        let padX: CGFloat = 18
+        let padTop: CGFloat = 12
+        let padBot: CGFloat = 12
+        let railH: CGFloat = 56
+        let footerH: CGFloat = 72
+        let gap: CGFloat = 10
+        let frameW = size.width - 2 * padX
 
-        guard let raw = ctx.makeImage() else { return nil }
-        return crt.process(raw) ?? raw
+        // Vertical budget for the four panels after rail/footer/padding/gaps.
+        // Six gaps: rail→agent, agent→model, model→quota, quota→subs,
+        // subs→footer, plus the outer top/bottom padding handled separately.
+        let stackTop = padTop + railH + gap
+        let stackBot = size.height - padBot - footerH - gap
+        let stackH = max(0, stackBot - stackTop)
+        // Panels get fixed shares of the stack height: agent and model are
+        // the busy ones, so they win. Sub-agents is allowed to absorb any
+        // residual when the math doesn't divide cleanly.
+        let interGap: CGFloat = 10
+        let totalGaps = 3 * interGap
+        let usable = max(0, stackH - totalGaps)
+        let agentH = (usable * 0.29).rounded()
+        let modelH = (usable * 0.41).rounded()
+        let quotaH = (usable * 0.16).rounded()
+        let subsH  = max(0, usable - agentH - modelH - quotaH)
+
+        let railRect = CGRect(x: padX, y: padTop, width: frameW, height: railH)
+        var y = stackTop
+        let agentRect = CGRect(x: padX, y: y, width: frameW, height: agentH)
+        y += agentH + interGap
+        let modelRect = CGRect(x: padX, y: y, width: frameW, height: modelH)
+        y += modelH + interGap
+        let quotaRect = CGRect(x: padX, y: y, width: frameW, height: quotaH)
+        y += quotaH + interGap
+        let subsRect = CGRect(x: padX, y: y, width: frameW, height: subsH)
+        let footerRect = CGRect(x: padX,
+                                y: size.height - padBot - footerH,
+                                width: frameW, height: footerH)
+
+        drawRailPortrait(into: ctx, rect: railRect, tel: tel, now: now)
+        drawPanel(ctx, rect: agentRect)
+        drawAgentPanel(into: ctx, rect: agentRect, tel: tel, blink: blink, now: now)
+        drawPanel(ctx, rect: modelRect)
+        drawModelPanel(into: ctx, rect: modelRect, tel: tel)
+        drawPanel(ctx, rect: quotaRect)
+        drawQuotaPanel(into: ctx, rect: quotaRect, tel: tel)
+        drawPanel(ctx, rect: subsRect)
+        drawSubAgentsPanel(into: ctx, rect: subsRect, tel: tel)
+        drawFooterPortrait(into: ctx, rect: footerRect, tel: tel, now: now)
     }
 
     // MARK: - Background
@@ -288,6 +361,84 @@ final class MatrixRenderer: @unchecked Sendable {
         }
     }
 
+    // MARK: - Rail (portrait)
+
+    /// Two-row rail for the 480-wide portrait layout. Top row: LED +
+    /// agent label, weekday/date right-aligned. Bottom row: cwd chip +
+    /// git branch chip + session id (elided to fit).
+    private func drawRailPortrait(into ctx: CGContext, rect: CGRect,
+                                  tel: Telemetry, now: Date) {
+        let row1Top = rect.minY + 4
+        let row1H: CGFloat = 22
+        let row1Mid = row1Top + row1H / 2
+        let row2Top = rect.minY + 30
+        let row2H: CGFloat = 22
+
+        let labelFont = MatrixTheme.font(13, weight: .bold)
+        let dateFont = MatrixTheme.font(11, weight: .bold)
+
+        // LED.
+        let ledColor: NSColor = {
+            switch tel.agent.status {
+            case .error: return MatrixTheme.magenta
+            case .idle:  return MatrixTheme.amber
+            default:     return MatrixTheme.phosphor
+            }
+        }()
+        var cx = rect.minX
+        ctx.setFillColor(ledColor.withAlphaComponent(0.35).cgColor)
+        ctx.fillEllipse(in: CGRect(x: cx - 4, y: row1Mid - 9, width: 18, height: 18))
+        ctx.setFillColor(ledColor.cgColor)
+        ctx.fillEllipse(in: CGRect(x: cx, y: row1Mid - 5, width: 10, height: 10))
+        cx += 22
+
+        // Agent label.
+        let label = tel.agent.kind.uppercased().replacingOccurrences(of: "-", with: " ")
+        let weekday: String = {
+            let f = DateFormatter()
+            f.dateFormat = "EEE"
+            return f.string(from: now).uppercased()
+        }()
+        let dateStr = "\(weekday) \(dateText(now))"
+        let dateW = stringWidth(dateStr, font: dateFont)
+        let labelMax = rect.maxX - dateW - 12 - cx
+        let labelDisp = elide(label, font: labelFont, maxW: labelMax)
+        _ = drawText(ctx, labelDisp, font: labelFont, color: MatrixTheme.ink,
+                     position: capTopOrigin(rowMid: row1Mid, font: labelFont, x: cx))
+
+        _ = drawText(ctx, dateStr, font: dateFont, color: MatrixTheme.inkDim,
+                     position: capTopOrigin(rowMid: row1Mid,
+                                            font: dateFont,
+                                            x: rect.maxX - dateW))
+
+        // Row 2 — cwd / branch / sess. Elide chips so they always fit.
+        var bx = rect.minX
+        let sessFont = MatrixTheme.font(10)
+        let sess = "SESS \(tel.agent.sessionID)"
+        let sessW = stringWidth(sess, font: sessFont) + 8
+        let chipBudget = rect.width - sessW - 8
+        // Render two chips left-to-right and clamp each to half of the
+        // budget so neither one starves the other on long branch names.
+        let branchText = tel.agent.gitBranch.isEmpty ? ""
+            : "⎇ \(tel.agent.gitBranch)\(tel.agent.gitDirty ? " ●" : "")"
+        let chipFont = MatrixTheme.font(11)
+        let cwdMax: CGFloat = branchText.isEmpty
+            ? chipBudget - 0
+            : (chipBudget - 8) * 0.55
+        let cwdDisp = elide(tel.agent.cwd, font: chipFont, maxW: cwdMax - 16)
+        bx += drawChip(ctx, x: bx, y: row2Top, text: cwdDisp) + 8
+        if !branchText.isEmpty {
+            let branchMax = rect.maxX - sessW - 8 - bx
+            let branchDisp = elide(branchText, font: chipFont,
+                                   maxW: max(20, branchMax - 16))
+            _ = drawChip(ctx, x: bx, y: row2Top, text: branchDisp)
+        }
+        _ = drawText(ctx, sess, font: sessFont, color: MatrixTheme.inkFaint,
+                     position: capTopOrigin(rowMid: row2Top + row2H / 2,
+                                            font: sessFont,
+                                            x: rect.maxX - stringWidth(sess, font: sessFont)))
+    }
+
     // MARK: - Agent panel
 
     private func drawAgentPanel(into ctx: CGContext, rect: CGRect, tel: Telemetry, blink: Double, now: Date) {
@@ -353,9 +504,9 @@ final class MatrixRenderer: @unchecked Sendable {
         detailParts.append(tel.agent.detail)
         let detail = detailParts.joined(separator: "  ")
         let detailFont = MatrixTheme.font(11)
-        _ = drawText(ctx, elide(detail, font: detailFont, maxW: maxW),
+        _ = drawText(ctx, elide(detail, font: detailFont, maxW: maxW + (bodyX - cx)),
                      font: detailFont, color: MatrixTheme.inkFaint,
-                     position: CGPoint(x: bodyX, y: cy))
+                     position: CGPoint(x: cx, y: cy))
         cy += 22
 
         // Log rows.
@@ -632,7 +783,14 @@ final class MatrixRenderer: @unchecked Sendable {
         // The caller has already sized `rect` to the badge's natural aspect
         // ratio at the desired height (see `badgeRenderWidth`) — so we just
         // fill it. Image is in y-down coords like the rest of our painting.
-        let resourceName = provider == "anthropic" ? "anthropic-figure" : "openai-logo"
+        let resourceName: String
+        if provider == "anthropic" {
+            resourceName = "anthropic-figure"
+        } else if provider == "google" {
+            resourceName = "google-logo"
+        } else {
+            resourceName = "openai-logo"
+        }
         guard let img = Self.badgeImage(named: resourceName) else { return }
         ctx.saveGState()
         ctx.translateBy(x: rect.minX, y: rect.minY)
@@ -645,7 +803,14 @@ final class MatrixRenderer: @unchecked Sendable {
     /// Natural pixel width of the provider badge at a given height. Falls
     /// back to a square if the asset can't be loaded.
     fileprivate static func badgeRenderWidth(provider: String, height: CGFloat) -> CGFloat {
-        let name = provider == "anthropic" ? "anthropic-figure" : "openai-logo"
+        let name: String
+        if provider == "anthropic" {
+            name = "anthropic-figure"
+        } else if provider == "google" {
+            name = "google-logo"
+        } else {
+            name = "openai-logo"
+        }
         guard let img = badgeImage(named: name), img.height > 0 else { return height }
         return height * CGFloat(img.width) / CGFloat(img.height)
     }
@@ -883,6 +1048,97 @@ final class MatrixRenderer: @unchecked Sendable {
         let weatherW = stringWidth(weatherText, font: smallFont)
         _ = drawText(ctx, weatherText, font: smallFont, color: MatrixTheme.inkDim,
                      position: CGPoint(x: rect.maxX - weatherW, y: smallTopY))
+    }
+
+    // MARK: - Footer (portrait)
+
+    /// Two-row portrait footer: big centered clock on top, stats +
+    /// weather on a small row below. Same visual hierarchy as the
+    /// landscape footer (clock is the hero), just stacked.
+    private func drawFooterPortrait(into ctx: CGContext, rect: CGRect,
+                                    tel: Telemetry, now: Date) {
+        let m = tel.model
+        let clockFont = MatrixTheme.font(32, weight: .heavy)
+        let smallFont = MatrixTheme.font(11)
+        let smallBoldFont = MatrixTheme.font(11, weight: .bold)
+
+        // Clock baseline using optical bounds of the glyph set.
+        let clockGlyphs = NSAttributedString(string: "0123456789:",
+                                             attributes: [.font: clockFont])
+        let tight = CTLineGetBoundsWithOptions(
+            CTLineCreateWithAttributedString(clockGlyphs), .useOpticalBounds)
+        let clockRowMid = rect.minY + rect.height * 0.36
+        let clockBaselineY = clockRowMid + (tight.origin.y + tight.height / 2)
+        let clockTopY = clockBaselineY - clockFont.ascender
+
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.hour, .minute, .second], from: now)
+        let h: String = {
+            switch UserPrefs.timeFormat {
+            case .h24: return String(format: "%02d", comps.hour ?? 0)
+            case .h12: return String(((comps.hour ?? 0) + 11) % 12 + 1)
+            }
+        }()
+        let mm = String(format: "%02d", comps.minute ?? 0)
+        let ss = String(format: "%02d", comps.second ?? 0)
+        let colon = (comps.second ?? 0).isMultiple(of: 2) ? ":" : " "
+        let clockParts = [h, colon, mm, colon, ss]
+        let widths = clockParts.map { stringWidth($0, font: clockFont) }
+        let ampm = amPm(now)
+        let ampmW = ampm.isEmpty ? 0 : stringWidth(ampm, font: smallBoldFont) + 6
+        let total = widths.reduce(0, +) + ampmW
+        var x = rect.midX - total / 2
+        for (part, w) in zip(clockParts, widths) {
+            _ = drawText(ctx, part, font: clockFont, color: MatrixTheme.ink,
+                         position: CGPoint(x: x, y: clockTopY))
+            x += w
+        }
+        if !ampm.isEmpty {
+            _ = drawText(ctx, ampm, font: smallBoldFont, color: MatrixTheme.inkDim,
+                         position: capTopOrigin(rowMid: clockRowMid,
+                                                font: smallBoldFont,
+                                                x: x + 6))
+        }
+
+        // Stats row underneath the clock. Three colored beats on the
+        // left, weather on the right — mirrors the landscape layout but
+        // squeezed onto one narrow line.
+        let statsRowMid = rect.maxY - 14
+        let statsTopY = statsRowMid - smallFont.ascender / 2 - 1
+        let lastText = m.lastRequestMs > 0 ? "\(Int(m.lastRequestMs))" : "—"
+        let lastUnit = m.lastRequestMs > 0 ? "ms" : ""
+        let p95Text = m.p95ms > 0 ? "\(Int(m.p95ms))ms" : "—"
+        let cachePct = Int(m.cacheReadTokens
+            / max(m.cacheReadTokens + m.inputTokens + m.cacheWriteTokens, 1) * 100)
+        let parts: [(String, String)] = [
+            (lastText, lastUnit),
+            ("P95 ", p95Text),
+            ("CACHE ", "\(cachePct)%"),
+        ]
+        var lx = rect.minX + 4
+        for (a, b) in parts {
+            let aw = drawText(ctx, a, font: smallBoldFont,
+                              color: MatrixTheme.phosphor,
+                              position: CGPoint(x: lx, y: statsTopY))
+            lx += aw + 2
+            let bw = drawText(ctx, b, font: smallFont,
+                              color: MatrixTheme.inkDim,
+                              position: CGPoint(x: lx, y: statsTopY))
+            lx += bw + 10
+        }
+
+        let weatherText = (WeatherService.shared.summary ?? "—").uppercased()
+        let weatherW = stringWidth(weatherText, font: smallFont)
+        // Clamp weather to whatever space the stats left so it never
+        // collides — elide before drawing if necessary.
+        let weatherMax = max(0, rect.maxX - 4 - lx - 6)
+        let weatherDisp = weatherW <= weatherMax
+            ? weatherText
+            : elide(weatherText, font: smallFont, maxW: weatherMax)
+        let weatherFinalW = stringWidth(weatherDisp, font: smallFont)
+        _ = drawText(ctx, weatherDisp, font: smallFont, color: MatrixTheme.inkDim,
+                     position: CGPoint(x: rect.maxX - 4 - weatherFinalW,
+                                       y: statsTopY))
     }
 
     // MARK: - Generic helpers

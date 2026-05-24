@@ -21,6 +21,10 @@ enum MatrixTheme {
     static let bgBot       = NSColor(srgbRed:   1/255.0, green:   9/255.0, blue:  10/255.0, alpha: 1.0)
 
     static let canvasSize = CGSize(width: 1280, height: 480)
+    /// Portrait canvas used when the LCD is rotated 90°/270°. Same pixel
+    /// budget as `canvasSize`, just transposed — panels are stacked
+    /// vertically rather than side-by-side.
+    static let canvasSizePortrait = CGSize(width: 480, height: 1280)
 
     // MARK: - Fonts
 

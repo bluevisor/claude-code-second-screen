@@ -83,9 +83,16 @@ final class RainPainter {
             }
         }
         let colCount = Int(canvasSize.width / glyphWidth)
+        // Stagger initial headRow across the whole lifecycle of a column
+        // (from one canvas-height above the top down to the bottom of
+        // the canvas) so columns aren't all clustered near the top edge
+        // when the rain starts up. Previously this used a narrow
+        // `-40 ..< 0` window which barely covered the landscape canvas
+        // and was minuscule on the portrait one.
+        let canvasRows = max(1, Int(canvasSize.height / glyphHeight))
         columns = (0..<colCount).map { i in
             Column(x: CGFloat(i) * glyphWidth,
-                   headRow: Int.random(in: -40 ..< 0),
+                   headRow: Int.random(in: -canvasRows ..< canvasRows),
                    lengthRows: Int.random(in: 8 ... 22),
                    glyphs: self.randomGlyphs(count: 28))
         }
@@ -134,7 +141,13 @@ final class RainPainter {
                 columns[i].glyphs[index] = randomGlyph()
             }
             if CGFloat(columns[i].headRow - columns[i].lengthRows) * glyphHeight > canvasSize.height {
-                columns[i].headRow = Int.random(in: -20 ..< 0)
+                // Spread the respawn position across roughly a canvas
+                // height worth of rows above the top — otherwise every
+                // column that finishes falling re-enters the visible
+                // area within a few rows of every other column and the
+                // rain re-syncs into uniform vertical bands.
+                let canvasRows = max(20, Int(canvasSize.height / glyphHeight))
+                columns[i].headRow = Int.random(in: -canvasRows ..< 0)
                 columns[i].lengthRows = Int.random(in: 8 ... 22)
                 columns[i].glyphs = randomGlyphs(count: 28)
             }

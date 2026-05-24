@@ -168,13 +168,19 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
 
     private func drawBottomStrip(into ctx: CGContext, weather: String) {
         let font = MatrixTheme.font(13)
-        let y = size.height - 38
-        // Tag at left
+        let tagFont = MatrixTheme.font(13, weight: .bold)
+        // Mirror the top strip's 32px inset. `drawText` interprets `y` as
+        // the cap-box top, so to put the cap-box bottom 32px above the
+        // canvas bottom we shift up by one cap-height. `font.capHeight`
+        // is well-defined for JBM Bold; the 0.7×pointSize fallback
+        // covers any system-font fallback path.
+        let cap = tagFont.capHeight > 0 ? tagFont.capHeight
+                                        : tagFont.pointSize * 0.7
+        let y = size.height - 32 - cap
         let tag = "▸ STANDBY"
-        _ = drawText(ctx, tag, font: MatrixTheme.font(13, weight: .bold),
+        _ = drawText(ctx, tag, font: tagFont,
                      color: MatrixTheme.phosphor,
                      position: CGPoint(x: 36, y: y))
-        // Weather at right
         let w = stringWidth(weather, font: font)
         _ = drawText(ctx, weather, font: font, color: MatrixTheme.inkDim,
                      position: CGPoint(x: size.width - 36 - w, y: y))
@@ -196,8 +202,24 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
         let blinkOn = (comps.second ?? 0).isMultiple(of: 2)
         let colon = blinkOn ? ":" : " "
 
-        let bigFont = MatrixTheme.font(150, weight: .heavy)
+        // Fit-to-width: measure the full HH:MM:SS string at the
+        // landscape-tuned reference size and shrink uniformly so the
+        // hero fills ~95% of the canvas. Measure on the concatenated
+        // string (not per-part) — per-part stringWidth rounds each
+        // result individually and the accumulated error noticeably
+        // undersized the result on the narrow portrait canvas. Don't
+        // pre-round the scaled point size either; `MatrixTheme.font`
+        // already rounds once after applying the fontScale.
         let parts = [hourPart, colon, mm, colon, ss]
+        let referencePt: CGFloat = 150
+        let marginFrac: CGFloat = 0.025
+        let referenceFont = MatrixTheme.font(referencePt, weight: .heavy)
+        let refTotal = stringWidth(parts.joined(), font: referenceFont)
+        let targetW = size.width * (1 - 2 * marginFrac)
+        let scale: CGFloat = refTotal > 0
+            ? min(1, targetW / refTotal)
+            : 1
+        let bigFont = MatrixTheme.font(referencePt * scale, weight: .heavy)
         let widths = parts.map { stringWidth($0, font: bigFont) }
         let total = widths.reduce(0, +)
         var x = (size.width - total) / 2
@@ -216,7 +238,11 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
         }
 
         // Secondary label below — AM/PM in 12h mode, weekday otherwise.
-        let subFont = MatrixTheme.font(18, weight: .bold)
+        // Scale with the same factor as the main digits so the
+        // sub-label and baseline gap track the hero proportions, with
+        // a small floor for legibility.
+        let subFont = MatrixTheme.font(max(10, 18 * scale), weight: .bold)
+        let subGap: CGFloat = max(10, 32 * scale)
         let sub: String = {
             switch format {
             case .h12:
@@ -232,7 +258,7 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
         let sw = stringWidth(sub, font: subFont)
         _ = drawText(ctx, sub, font: subFont, color: MatrixTheme.inkFaint,
                      position: CGPoint(x: size.width / 2 - sw / 2,
-                                       y: baselineY + 32))
+                                       y: baselineY + subGap))
     }
 
     // MARK: - Scanlines / vignette
