@@ -22,11 +22,17 @@ final class RainPainter {
     private var columns: [Column] = []
     private var lastStep: TimeInterval = 0
     private let stepInterval: TimeInterval
-    /// Cached rendering of the current column state. Reused for every
-    /// frame between `step()` calls — at the default 12 Hz step rate
-    /// and 30 fps draw rate that's ~60% of frames served from the
-    /// cache. Invalidated by setting to `nil` inside `step()`.
+    /// Cached rendering of the current column state, reused between
+    /// `step()` calls. Only populated when `useCache` is true.
     private var cachedFrame: CGImage?
+    /// Whether the offscreen cache is worth keeping. It pays off when
+    /// the rain steps meaningfully slower than the host renders — every
+    /// "between-step" draw becomes a cheap image stamp. When `stepHz`
+    /// matches the draw rate, every draw triggers a step → the cache
+    /// invalidates every frame and the offscreen ctx alloc + makeImage
+    /// becomes pure overhead vs. painting glyphs directly. The 20 Hz
+    /// threshold assumes the host loop runs at 30 fps.
+    private let useCache: Bool
     private let colorSpace = CGColorSpaceCreateDeviceRGB()
     /// Half-width katakana (U+FF61–U+FF9F block) rather than full-width
     /// kana. Full-width katakana render roughly twice as wide as the ASCII
@@ -50,9 +56,10 @@ final class RainPainter {
     /// Pre-baked trail-alpha colors keyed by row offset from the head.
     private let trailColors: [CGColor]
 
-    init(canvasSize: CGSize = MatrixTheme.canvasSize, stepHz: Double = 12) {
+    init(canvasSize: CGSize = MatrixTheme.canvasSize, stepHz: Double = 30) {
         self.canvasSize = canvasSize
         self.stepInterval = 1.0 / max(1, stepHz)
+        self.useCache = stepHz < 20
         let baseFont = Self.rainFont(
             size: MatrixTheme.font(11, weight: .medium).pointSize
         ) as CTFont
@@ -109,6 +116,14 @@ final class RainPainter {
             step()
             cachedFrame = nil
             lastStep = now
+        }
+        guard useCache else {
+            // Step rate is at or near draw rate — the cache would
+            // invalidate every frame anyway. Paint directly into ctx so
+            // we avoid the offscreen alloc + makeImage round-trip.
+            // P2's batched-by-color CTFontDrawGlyphs still applies.
+            paintGlyphs(into: ctx)
+            return
         }
         // Reuse the cache when the column state hasn't changed since the
         // last step — same pixels, no glyph drawing. ctx is y-flipped

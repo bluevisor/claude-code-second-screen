@@ -92,7 +92,7 @@ final class MatrixRenderer: @unchecked Sendable {
 
     init(size: CGSize = MatrixTheme.canvasSize,
          showRain: Bool = true,
-         rainFPS: Double = 12) {
+         rainFPS: Double = 30) {
         self.size = size
         self.showRain = showRain
         self.rain = RainPainter(canvasSize: size, stepHz: rainFPS)
