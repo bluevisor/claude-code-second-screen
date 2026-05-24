@@ -12,6 +12,7 @@ import SwiftUI
 
 struct PreviewWindow: View {
     @EnvironmentObject private var env: AppEnvironment
+    @State private var showingConfig = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -34,17 +35,35 @@ struct PreviewWindow: View {
         }
         .frame(minWidth: 640, minHeight: 240)
         .navigationTitle("NeoDashboard · Live Preview")
+        // Tell FrameLoop whether to bother publishing the per-frame
+        // CGImage. When this window is closed, nothing is reading it.
+        .onAppear { env.previewWindowVisible = true }
+        .onDisappear { env.previewWindowVisible = false }
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
-                Picker("Mode", selection: $env.mode) {
+                Menu {
                     ForEach(AppEnvironment.RenderMode.allCases) { m in
-                        Text(m.rawValue).tag(m)
+                        Button {
+                            env.mode = m
+                            env.loop?.reconfigure()
+                        } label: {
+                            Label(m.rawValue, systemImage: themeSymbol(m))
+                        }
                     }
+                } label: {
+                    Label(env.mode.rawValue, systemImage: themeSymbol(env.mode))
                 }
-                .pickerStyle(.menu)
-                .frame(width: 150)
-                .help("Which dashboard to show on the LCD")
-                .onChange(of: env.mode) { _, _ in env.loop?.reconfigure() }
+                .help("Theme")
+                Button {
+                    showingConfig.toggle()
+                } label: {
+                    Label("Config", systemImage: "slider.horizontal.3")
+                }
+                .help("Source, time/temperature format, theme tuning")
+                .popover(isPresented: $showingConfig,
+                         arrowEdge: .bottom) {
+                    ConfigPanel().environmentObject(env)
+                }
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
@@ -80,5 +99,16 @@ struct PreviewWindow: View {
     private func sanitized(_ size: CGSize) -> CGSize {
         CGSize(width: max(1, size.width.isFinite ? size.width : 1),
                height: max(1, size.height.isFinite ? size.height : 1))
+    }
+
+    private func themeSymbol(_ mode: AppEnvironment.RenderMode) -> String {
+        switch mode {
+        case .matrixDashboard: return "terminal"
+        case .cozy: return "leaf"
+        case .wowAlliance: return "shield.lefthalf.filled"
+        case .wowHorde: return "flame"
+        case .animalCrossing: return "tree"
+        case .dragonball: return "circle.hexagongrid"
+        }
     }
 }

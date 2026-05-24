@@ -150,22 +150,20 @@ final class AnimalCrossingRenderer: FrameRenderer {
                           color: palette.dim)
 
         // Big clock filling the body.
-        let cal = Calendar(identifier: .gregorian)
-        let comps = cal.dateComponents([.hour, .minute, .second], from: now)
-        let h12 = ((comps.hour ?? 0) + 11) % 12 + 1
-        let mm = String(format: "%02d", comps.minute ?? 0)
-        let blinkOn = (comps.second ?? 0).isMultiple(of: 2)
-        let clockText = "\(h12):\(mm)"
+        let blinkOn = Calendar.current
+            .component(.second, from: now).isMultiple(of: 2)
+        let timeStr = clockText(now)
+        let ampm = amPm(now)
 
         let clockFont = roundedFont(160, weight: .heavy)
         // Keep the colon in the layout always; toggle its colour to clear
         // when the blink is off so the digits don't shift.
         let attr = NSMutableAttributedString(
-            string: clockText,
+            string: timeStr,
             attributes: [.font: clockFont, .foregroundColor: palette.text])
-        if !blinkOn, let r = clockText.range(of: ":") {
+        if !blinkOn, let r = timeStr.range(of: ":") {
             attr.addAttribute(.foregroundColor, value: NSColor.clear,
-                              range: NSRange(r, in: clockText))
+                              range: NSRange(r, in: timeStr))
         }
         let line = CTLineCreateWithAttributedString(attr)
         let bounds = CTLineGetBoundsWithOptions(line, .useOpticalBounds)
@@ -182,7 +180,8 @@ final class AnimalCrossingRenderer: FrameRenderer {
 
         // "Napping" tag under the clock, AC-style.
         let napFont = roundedFont(18, weight: .semibold)
-        let nap = "💤  taking a nap"
+        let nap = ampm.isEmpty ? "💤  taking a nap"
+                                : "💤  \(ampm) — taking a nap"
         let napW = textWidth(nap, font: napFont)
         textBaselineMid(ctx, nap, font: napFont, color: palette.dim,
                         x: size.width / 2 - napW / 2, midY: bodyMid + 110)
@@ -322,11 +321,8 @@ final class AnimalCrossingRenderer: FrameRenderer {
     }
 
     private func timeText(for now: Date) -> String {
-        let cal = Calendar(identifier: .gregorian)
-        let comps = cal.dateComponents([.hour, .minute], from: now)
-        let h12 = ((comps.hour ?? 0) + 11) % 12 + 1
-        let ampm = (comps.hour ?? 0) >= 12 ? "PM" : "AM"
-        return String(format: "%d:%02d %@", h12, comps.minute ?? 0, ampm)
+        let suffix = amPm(now)
+        return suffix.isEmpty ? clockText(now) : "\(clockText(now)) \(suffix)"
     }
 
     // MARK: - Friend tile (avatar on a polaroid)

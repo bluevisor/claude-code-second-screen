@@ -244,8 +244,15 @@ final class ClaudeCodeSource: TelemetrySource {
             if let v = ev.raw["sessionId"] as? String { sessionUUID = v }
             if startedAt.isEmpty, let v = ev.raw["timestamp"] as? String { startedAt = v }
         }
+        // Skip `<synthetic>` events — Claude Code emits those for its
+        // internal title-generation / summary calls, not the user's
+        // chosen model. Without this filter the dashboard ends up
+        // showing "Claude v?" right after one of those housekeeping
+        // events runs.
         for ev in events.reversed() where ev.type == "assistant" {
-            if let m = ev.message["model"] as? String, !m.isEmpty {
+            if let m = ev.message["model"] as? String,
+               !m.isEmpty,
+               !m.hasPrefix("<") {
                 lastModelID = m
                 break
             }
@@ -375,14 +382,36 @@ final class ClaudeCodeSource: TelemetrySource {
             log: log,
             subAgents: subs
         )
+        // Thinking detection — Claude's `/effort` setting
+        // (low/medium/high/xhigh/max/auto) is a per-request
+        // `thinking.budget_tokens` parameter sent to the API; it is
+        // never echoed back into the jsonl. We tried inferring effort
+        // from emitted thinking-text length, but that lies in both
+        // directions (a short response on xhigh looks "low"; the model
+        // can also burn the full budget regardless of setting). Surface
+        // ON/OFF only, which is something we can actually verify.
+        var thinking: ThinkingMode = .off
+        for ev in events.suffix(40).reversed() where ev.type == "assistant" {
+            if let content = ev.message["content"] as? [[String: Any]],
+               content.contains(where: { ($0["type"] as? String) == "thinking" }) {
+                thinking = .on
+                break
+            }
+        }
+        // Append " 1M" to the display name when the context window
+        // appears to be the extended-context variant. We infer that from
+        // contextMax having been bumped past 200K above (driven by token
+        // usage); the API id is just `claude-sonnet-4-6` either way.
+        let displayName = contextMax >= 1_000_000 ? "\(modelName) 1M" : modelName
         let model = AgentModel(
             id: lastModelID.isEmpty ? "claude" : lastModelID,
-            name: modelName, version: version, provider: "anthropic",
+            name: displayName, version: version, provider: "anthropic",
             contextUsed: ctxUsed, contextMax: contextMax,
             inputTokens: totalIn, outputTokens: totalOut,
             cacheReadTokens: totalCR, cacheWriteTokens: totalCC,
             p50ms: p50, p95ms: p95, lastRequestMs: lastMs,
-            latencyHistory: latencies
+            latencyHistory: latencies,
+            thinking: thinking
         )
         _ = family // reserved for plan-pricing dispatch in the future
         let quota = Quota(
@@ -620,6 +649,10 @@ extension ClaudeCodeSource {
         return f
     }()
 }
+
+// (Removed `inferThinkingEffort` heuristic — it was guessing the
+// /effort setting from observed thinking-text length, which is not
+// reliable in either direction. See comment in `buildTelemetry`.)
 
 private func newestJSONL(under root: URL) -> URL? {
     guard let it = FileManager.default.enumerator(

@@ -112,23 +112,22 @@ final class ImageRenderer: FrameRenderer {
         ctx.fill(CGRect(origin: .zero, size: size))
 
         // 3. Big centred HH:MM in the theme image's main visual contrast.
-        let cal = Calendar(identifier: .gregorian)
-        let comps = cal.dateComponents([.hour, .minute, .second], from: now)
-        let h12 = ((comps.hour ?? 0) + 11) % 12 + 1
-        let mm = String(format: "%02d", comps.minute ?? 0)
-        let blinkOn = (comps.second ?? 0).isMultiple(of: 2)
-        let clockText = "\(h12):\(mm)"
+        let blinkOn = Calendar.current
+            .component(.second, from: now)
+            .isMultiple(of: 2)
+        let timeStr = clockText(now)
+        let ampm = amPm(now)
 
         let clockFont = roundedFont(size: 200, weight: .heavy)
         // Always include the colon glyph in the layout so the digits stay
         // pinned. Toggle the colon's foreground colour between white and
         // clear to blink it without shifting anything.
         let attr = NSMutableAttributedString(
-            string: clockText,
+            string: timeStr,
             attributes: [.font: clockFont, .foregroundColor: NSColor.white])
-        if !blinkOn, let r = clockText.range(of: ":") {
+        if !blinkOn, let r = timeStr.range(of: ":") {
             attr.addAttribute(.foregroundColor, value: NSColor.clear,
-                              range: NSRange(r, in: clockText))
+                              range: NSRange(r, in: timeStr))
         }
         let line = CTLineCreateWithAttributedString(attr)
         let bounds = CTLineGetBoundsWithOptions(line, .useOpticalBounds)
@@ -142,7 +141,33 @@ final class ImageRenderer: FrameRenderer {
         CTLineDraw(line, ctx)
         ctx.restoreGState()
 
+        // AM/PM beside the clock when in 12-hour mode.
+        if !ampm.isEmpty {
+            let ampmFont = roundedFont(size: 38, weight: .semibold)
+            let line2 = CTLineCreateWithAttributedString(
+                NSAttributedString(string: ampm,
+                                   attributes: [.font: ampmFont,
+                                                .foregroundColor: NSColor.white.withAlphaComponent(0.85)]))
+            let b2 = CTLineGetBoundsWithOptions(line2, .useOpticalBounds)
+            let x2 = x + bounds.width + 14
+            let by2 = baselineY - bigOffset(for: bounds, into: b2)
+            ctx.saveGState()
+            ctx.textMatrix = .identity
+            ctx.translateBy(x: x2, y: by2)
+            ctx.scaleBy(x: 1, y: -1)
+            ctx.textPosition = .zero
+            CTLineDraw(line2, ctx)
+            ctx.restoreGState()
+        }
+
         return ctx.makeImage()
+    }
+
+    /// Aligns the AM/PM glyph's baseline so it sits a touch above the
+    /// digits' baseline — feels right with our rounded heavy face.
+    private func bigOffset(for big: CGRect, into small: CGRect) -> CGFloat {
+        // Move the small-text baseline up by ~half the big glyph height.
+        big.height * 0.20 + small.height * 0.0
     }
 
     private func roundedFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {

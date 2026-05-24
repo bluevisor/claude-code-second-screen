@@ -76,6 +76,31 @@ final class AppEnvironment: ObservableObject {
         var id: String { rawValue }
     }
 
+    enum TimeFormat: String, CaseIterable, Identifiable {
+        case h12 = "12-hour"
+        case h24 = "24-hour"
+        var id: String { rawValue }
+    }
+
+    enum TemperatureUnit: String, CaseIterable, Identifiable {
+        case fahrenheit = "°F"
+        case celsius = "°C"
+        var id: String { rawValue }
+        var openMeteoParam: String {
+            self == .celsius ? "celsius" : "fahrenheit"
+        }
+    }
+
+    /// Numeric date layout. The weekday prefix used by the top strip is
+    /// rendered separately; this controls the digits + separator only.
+    enum DateFormat: String, CaseIterable, Identifiable {
+        case usDot = "MM.DD.YYYY"
+        case iso = "YYYY-MM-DD"
+        case eu = "DD.MM.YYYY"
+        case longHuman = "MMM D, YYYY"
+        var id: String { rawValue }
+    }
+
     // Persisted user preferences (UserDefaults via @AppStorage-style wrappers).
     @Published var sourceSelection: SourceSelection = .auto {
         didSet { applySourceSelection() }
@@ -87,11 +112,35 @@ final class AppEnvironment: ObservableObject {
     @Published var flipHorizontal: Bool { didSet { Defaults.flipHorizontal = flipHorizontal } }
     @Published var flipVertical: Bool { didSet { Defaults.flipVertical = flipVertical } }
     @Published var mode: RenderMode { didSet { Defaults.mode = mode.rawValue } }
+    @Published var timeFormat: TimeFormat {
+        didSet {
+            Defaults.timeFormat = timeFormat.rawValue
+            UserPrefs.update(timeFormat: timeFormat)
+        }
+    }
+    @Published var temperatureUnit: TemperatureUnit {
+        didSet {
+            Defaults.temperatureUnit = temperatureUnit.rawValue
+            UserPrefs.update(temperatureUnit: temperatureUnit)
+            WeatherService.shared.refreshNow()
+        }
+    }
+    @Published var dateFormat: DateFormat {
+        didSet {
+            Defaults.dateFormat = dateFormat.rawValue
+            UserPrefs.update(dateFormat: dateFormat)
+        }
+    }
     /// Manual override — when true the LCD shows the clock regardless of
     /// whether the active source has telemetry. The clock fallback still
     /// auto-engages when telemetry is absent, this just lets the user pin
     /// it on (e.g. for an ambient desk look while keeping a busy session).
     @Published var forceClock: Bool { didSet { Defaults.forceClock = forceClock } }
+    /// PreviewWindow flips this on appear / off on disappear. FrameLoop
+    /// reads it to skip the main-actor `updatePreview(image:)` hop when
+    /// nothing on screen would render the new image — recovers a few
+    /// fps when the preview window is closed (the LCD is the only sink).
+    @Published var previewWindowVisible: Bool = false
 
     /// LCD push is always on while the app runs — the device is the whole
     /// point of the program. Exposed as a constant so call sites that used
@@ -144,7 +193,13 @@ final class AppEnvironment: ObservableObject {
         self.flipHorizontal = Defaults.flipHorizontal
         self.flipVertical = Defaults.flipVertical
         self.mode = RenderMode(rawValue: Defaults.mode) ?? .matrixDashboard
+        self.timeFormat = TimeFormat(rawValue: Defaults.timeFormat) ?? .h12
+        self.temperatureUnit = TemperatureUnit(rawValue: Defaults.temperatureUnit) ?? .fahrenheit
+        self.dateFormat = DateFormat(rawValue: Defaults.dateFormat) ?? .usDot
         self.forceClock = Defaults.forceClock
+        UserPrefs.update(timeFormat: self.timeFormat)
+        UserPrefs.update(temperatureUnit: self.temperatureUnit)
+        UserPrefs.update(dateFormat: self.dateFormat)
         AppEnvironment.shared = self
     }
 
@@ -241,5 +296,17 @@ private enum Defaults {
     static var mode: String {
         get { d.string(forKey: "mode") ?? "Matrix Dashboard" }
         set { d.set(newValue, forKey: "mode") }
+    }
+    static var timeFormat: String {
+        get { d.string(forKey: "timeFormat") ?? "12-hour" }
+        set { d.set(newValue, forKey: "timeFormat") }
+    }
+    static var temperatureUnit: String {
+        get { d.string(forKey: "temperatureUnit") ?? "°F" }
+        set { d.set(newValue, forKey: "temperatureUnit") }
+    }
+    static var dateFormat: String {
+        get { d.string(forKey: "dateFormat") ?? "MM.DD.YYYY" }
+        set { d.set(newValue, forKey: "dateFormat") }
     }
 }

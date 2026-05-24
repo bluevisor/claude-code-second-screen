@@ -69,6 +69,17 @@ struct AgentModel: Sendable {
     /// Renderers sparkline this; empty when the source hasn't seen enough
     /// events yet.
     var latencyHistory: [Double] = []
+    /// Thinking / reasoning state, surfaced under the model name.
+    /// Values: `.off`, `.on` (Claude binary), or `.effort("low"|"medium"|"high"|"xhigh")`
+    /// for providers that expose a graded effort knob (Codex / o-series).
+    var thinking: ThinkingMode = .unknown
+}
+
+enum ThinkingMode: Sendable, Equatable {
+    case unknown
+    case off
+    case on
+    case effort(String)        // "low" / "medium" / "high" / "xhigh"
 }
 
 struct QuotaWindow: Sendable {

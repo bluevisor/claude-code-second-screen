@@ -6,6 +6,7 @@
 
 import AppKit
 import CoreGraphics
+import CoreText
 
 final class RainPainter {
     private struct Column {
@@ -21,46 +22,72 @@ final class RainPainter {
     private var columns: [Column] = []
     private var lastStep: TimeInterval = 0
     private let stepInterval: TimeInterval
-    private let glyphAlphabet: [Character] = Array(
-        "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ" +
-            "0123456789ABCDEFXYZ"
+    /// Half-width katakana (U+FF61–U+FF9F block) rather than full-width
+    /// kana. Full-width katakana render roughly twice as wide as the ASCII
+    /// digits, so columns mixing the two no longer lined up on the fixed
+    /// `glyphWidth` grid — the half-width forms share the digits' advance.
+    /// Matches the character widths used by the Matrix-Rain_Terminal
+    /// reference project.
+    private static let baseAlphabet: [Character] = Array(
+        "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉ" +
+            "ﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜｦﾝ0123456789"
     )
-    /// One CTLine per glyph, baked once at init. The line carries no
-    /// foreground color attribute so `CTLineDraw` picks up whatever
-    /// `ctx.setFillColor` set just before — letting us vary trail alpha
-    /// per row without rebuilding ~1.7k attributed strings per frame.
-    private let glyphLines: [Character: CTLine]
+    private let glyphAlphabet: [Character]
+    private let glitchProbability: Double = 0.01
+    /// Font + CGGlyph IDs baked once at init. We draw via
+    /// `CTFontDrawGlyphs`, which (unlike `CTLineDraw` with no colour
+    /// attribute) actually honours the context's current fill colour —
+    /// letting us vary trail alpha per row without rebuilding ~1.7k
+    /// attributed strings per frame.
+    private let font: CTFont
+    private let glyphIDs: [Character: CGGlyph]
     /// Pre-baked trail-alpha colors keyed by row offset from the head.
     private let trailColors: [CGColor]
 
     init(canvasSize: CGSize = MatrixTheme.canvasSize, stepHz: Double = 12) {
         self.canvasSize = canvasSize
         self.stepInterval = 1.0 / max(1, stepHz)
-        // Bake one CTLine per glyph using the rain font without any
-        // foreground-color attribute, so CTLineDraw picks up the current
-        // ctx fill color and we can vary alpha cheaply per row.
-        let font = MatrixTheme.font(11, weight: .medium)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        var lines: [Character: CTLine] = [:]
-        for c in glyphAlphabet {
-            let s = NSAttributedString(string: String(c), attributes: attrs)
-            lines[c] = CTLineCreateWithAttributedString(s)
+        let baseFont = Self.rainFont(
+            size: MatrixTheme.font(11, weight: .medium).pointSize
+        ) as CTFont
+        self.font = baseFont
+        var ids: [Character: CGGlyph] = [:]
+        var usableAlphabet: [Character] = []
+        for c in Self.baseAlphabet {
+            let utf16 = Array(String(c).utf16)
+            var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
+            CTFontGetGlyphsForCharacters(baseFont, utf16,
+                                         &glyphs, utf16.count)
+            let glyph = glyphs.first ?? 0
+            if glyph != 0 {
+                ids[c] = glyph
+                usableAlphabet.append(c)
+            }
         }
-        self.glyphLines = lines
-        // 25 alpha levels covers any realistic trail length.
+        self.glyphIDs = ids
+        self.glyphAlphabet = usableAlphabet.isEmpty ? Array("0123456789") : usableAlphabet
+        // 25 alpha levels covers any realistic trail length. The leading
+        // glyph (j == 0) is bright near-white so a freshly spawned
+        // character pops the instant it appears — like the white head of
+        // the Matrix-Rain_Terminal reference. j == 1 is full-strength
+        // phosphor, then the tail fades out behind it.
         self.trailColors = (0..<25).map { j -> CGColor in
-            let alpha: CGFloat = j == 0 ? 0.9
-                : max(0.05, 0.5 - CGFloat(j) * 0.045)
-            return MatrixTheme.phosphor.withAlphaComponent(alpha).cgColor
+            switch j {
+            case 0:
+                return MatrixTheme.ink.cgColor
+            case 1:
+                return MatrixTheme.phosphor.cgColor
+            default:
+                let alpha = max(0.05, 0.5 - CGFloat(j) * 0.045)
+                return MatrixTheme.phosphor.withAlphaComponent(alpha).cgColor
+            }
         }
         let colCount = Int(canvasSize.width / glyphWidth)
         columns = (0..<colCount).map { i in
             Column(x: CGFloat(i) * glyphWidth,
                    headRow: Int.random(in: -40 ..< 0),
                    lengthRows: Int.random(in: 8 ... 22),
-                   glyphs: (0..<60).map { _ in
-                       self.glyphAlphabet.randomElement()!
-                   })
+                   glyphs: self.randomGlyphs(count: 28))
         }
     }
 
@@ -71,24 +98,25 @@ final class RainPainter {
         }
         ctx.saveGState()
         ctx.textMatrix = .identity
-        // Flip once for the whole pass: each glyph draws at (x, baseline)
-        // in the flipped frame, then we translate per-glyph.
         let lastTrailIdx = trailColors.count - 1
+        var glyph: CGGlyph = 0
+        let origin = CGPoint.zero
         for col in columns {
-            let xPhase = Int(col.x.truncatingRemainder(dividingBy: 7))
             for j in 0..<col.lengthRows {
                 let row = col.headRow - j
                 if row < 0 { continue }
                 let y = CGFloat(row) * glyphHeight
                 if y > canvasSize.height + glyphHeight { continue }
-                let glyph = col.glyphs[(row + xPhase) % col.glyphs.count]
-                guard let line = glyphLines[glyph] else { continue }
+                let charKey = col.glyphs[j % col.glyphs.count]
+                guard let gid = glyphIDs[charKey], gid != 0 else { continue }
                 ctx.setFillColor(trailColors[min(j, lastTrailIdx)])
                 ctx.saveGState()
                 ctx.translateBy(x: col.x, y: y + 11)
                 ctx.scaleBy(x: 1, y: -1)
-                ctx.textPosition = .zero
-                CTLineDraw(line, ctx)
+                glyph = gid
+                withUnsafePointer(to: origin) { ptr in
+                    CTFontDrawGlyphs(font, &glyph, ptr, 1, ctx)
+                }
                 ctx.restoreGState()
             }
         }
@@ -98,23 +126,40 @@ final class RainPainter {
     private func step() {
         for i in 0..<columns.count {
             columns[i].headRow += 1
+            columns[i].glyphs.insert(randomGlyph(), at: 0)
+            columns[i].glyphs.removeLast()
+            if Double.random(in: 0..<1) < glitchProbability,
+               columns[i].glyphs.count > 2 {
+                let index = Int.random(in: 2..<columns[i].glyphs.count)
+                columns[i].glyphs[index] = randomGlyph()
+            }
             if CGFloat(columns[i].headRow - columns[i].lengthRows) * glyphHeight > canvasSize.height {
                 columns[i].headRow = Int.random(in: -20 ..< 0)
                 columns[i].lengthRows = Int.random(in: 8 ... 22)
-                columns[i].glyphs = (0..<60).map { _ in glyphAlphabet.randomElement()! }
+                columns[i].glyphs = randomGlyphs(count: 28)
             }
         }
     }
 
-    private func drawString(_ s: NSAttributedString, at p: CGPoint, in ctx: CGContext) {
-        let line = CTLineCreateWithAttributedString(s)
-        // Move and flip vertically because Core Text draws from baseline up.
-        ctx.saveGState()
-        ctx.textMatrix = .identity
-        ctx.translateBy(x: p.x, y: p.y + 11)
-        ctx.scaleBy(x: 1, y: -1)
-        ctx.textPosition = .zero
-        CTLineDraw(line, ctx)
-        ctx.restoreGState()
+    private func randomGlyphs(count: Int) -> [Character] {
+        (0..<count).map { _ in randomGlyph() }
+    }
+
+    private func randomGlyph() -> Character {
+        glyphAlphabet.randomElement() ?? "0"
+    }
+
+    private static func rainFont(size: CGFloat) -> NSFont {
+        for name in [
+            "HiraginoSans-W3",
+            "HiraginoSans-W6",
+            "Hiragino Sans W3",
+            "Hiragino Sans"
+        ] {
+            if let font = NSFont(name: name, size: size) {
+                return font
+            }
+        }
+        return NSFont.systemFont(ofSize: size, weight: .medium)
     }
 }

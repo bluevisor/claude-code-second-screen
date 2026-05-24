@@ -36,6 +36,15 @@ enum CodexAgentKind: String {
         case .agy: return "local"
         }
     }
+
+    var configURL: URL {
+        let path: String
+        switch self {
+        case .codex: path = "~/.codex/config.toml"
+        case .agy: path = "~/.agy/config.toml"
+        }
+        return URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
+    }
 }
 
 final class CodexSource: TelemetrySource {
@@ -58,8 +67,11 @@ final class CodexSource: TelemetrySource {
     private var lastGitDirtyCwd = ""
     private var lastGitDirtyAt: TimeInterval = 0
     private var lastGitDirty = false
+    private var cachedReasoningConfig = CodexReasoningConfig()
+    private var lastReasoningConfigReadAt: TimeInterval = -Double.infinity
     private let discoveryInterval: TimeInterval = 5
     private let gitDirtyInterval: TimeInterval = 30
+    private let reasoningConfigInterval: TimeInterval = 5
     private let maxRetainedEvents = 4_000
     private let maxRetainedTokenSamples = 2_000
 
@@ -332,6 +344,8 @@ final class CodexSource: TelemetrySource {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let prettyCWD = (cwd.isEmpty ? "~" : cwd).replacingOccurrences(of: home, with: "~")
         let started = codexISOToDate(startedAt) ?? .now
+        let thinking = codexReasoningEffort(events)
+            ?? configuredReasoningEffort(cwd: cwd)
 
         let agent = Agent(
             kind: kind.rawValue,
@@ -364,7 +378,9 @@ final class CodexSource: TelemetrySource {
             cacheWriteTokens: totalCacheCreate,
             p50ms: p50,
             p95ms: p95,
-            lastRequestMs: lastMs
+            lastRequestMs: lastMs,
+            latencyHistory: [],
+            thinking: thinking.map { .effort($0) } ?? .on
         )
         let quota = Quota(
             plan: plan,
@@ -430,9 +446,89 @@ final class CodexSource: TelemetrySource {
         lastGitDirty = gitDirtyCodex(cwd: cwd)
         return lastGitDirty
     }
+
+    private func configuredReasoningEffort(cwd: String) -> String? {
+        let now = Date.now.timeIntervalSince1970
+        if now - lastReasoningConfigReadAt >= reasoningConfigInterval {
+            cachedReasoningConfig = CodexReasoningConfig.load(from: kind.configURL)
+            lastReasoningConfigReadAt = now
+        }
+        return cachedReasoningConfig.effort(for: cwd)
+    }
 }
 
 // MARK: - Event derivation helpers
+
+private struct CodexReasoningConfig {
+    var globalEffort: String?
+    var projectEfforts: [String: String] = [:]
+
+    func effort(for cwd: String) -> String? {
+        let path = NSString(string: cwd).expandingTildeInPath
+        let best = projectEfforts
+            .filter { project, _ in
+                path == project || path.hasPrefix(project.hasSuffix("/") ? project : project + "/")
+            }
+            .max { a, b in a.key.count < b.key.count }
+        return best?.value ?? globalEffort
+    }
+
+    static func load(from url: URL) -> CodexReasoningConfig {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return CodexReasoningConfig()
+        }
+
+        var config = CodexReasoningConfig()
+        var section: String?
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+
+            if line.hasPrefix("["), line.hasSuffix("]") {
+                section = String(line.dropFirst().dropLast())
+                continue
+            }
+
+            guard let (key, value) = tomlKeyValue(line),
+                  ["model_reasoning_effort", "reasoning_effort"].contains(key),
+                  let effort = normalizedReasoningEffort(value) else {
+                continue
+            }
+            if let project = projectPath(from: section) {
+                config.projectEfforts[project] = effort
+            } else if section == nil {
+                config.globalEffort = effort
+            }
+        }
+        return config
+    }
+
+    private static func projectPath(from section: String?) -> String? {
+        guard let section,
+              section.hasPrefix("projects.\""),
+              section.hasSuffix("\"") else { return nil }
+        return String(section.dropFirst("projects.\"".count).dropLast())
+    }
+}
+
+private func tomlKeyValue(_ line: String) -> (String, String)? {
+    guard let eq = line.firstIndex(of: "=") else { return nil }
+    let key = line[..<eq].trimmingCharacters(in: .whitespacesAndNewlines)
+    var value = line[line.index(after: eq)...].trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !key.isEmpty, !value.isEmpty else { return nil }
+
+    if value.hasPrefix("\"") {
+        value.removeFirst()
+        if let end = value.firstIndex(of: "\"") {
+            value = String(value[..<end])
+        }
+    } else {
+        value = value.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+    return (key, String(value))
+}
 
 private struct CodexEvent {
     let raw: [String: Any]
@@ -451,6 +547,40 @@ private struct CodexEvent {
         }
         self.payload = (raw["payload"] as? [String: Any]) ?? [:]
     }
+}
+
+private func codexReasoningEffort(_ events: [CodexEvent]) -> String? {
+    for ev in events.reversed() {
+        if let effort = reasoningEffort(in: ev.payload) ?? reasoningEffort(in: ev.raw) {
+            return effort
+        }
+    }
+    return nil
+}
+
+private func reasoningEffort(in dict: [String: Any], depth: Int = 0) -> String? {
+    guard depth < 4 else { return nil }
+    for key in ["model_reasoning_effort", "reasoning_effort", "reasoningEffort"] {
+        if let effort = normalizedReasoningEffort(dict[key]) {
+            return effort
+        }
+    }
+    for key in ["config", "settings", "model", "request", "request_options", "options", "payload"] {
+        if let nested = dict[key] as? [String: Any],
+           let effort = reasoningEffort(in: nested, depth: depth + 1) {
+            return effort
+        }
+    }
+    return nil
+}
+
+private func normalizedReasoningEffort(_ value: Any?) -> String? {
+    guard let raw = value as? String else { return nil }
+    let effort = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !effort.isEmpty else { return nil }
+    let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+    guard effort.rangeOfCharacter(from: allowed.inverted) == nil else { return nil }
+    return effort
 }
 
 private func currentTask(_ events: [CodexEvent]) -> String {

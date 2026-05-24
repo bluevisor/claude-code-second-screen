@@ -26,6 +26,10 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026 Bluevisor</string>
+	<key>NSLocationUsageDescription</key>
+	<string>NeoDashboard uses your location to show local weather on the LCD.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>NeoDashboard uses your location to show local weather on the LCD.</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSSupportsSuddenTermination</key>

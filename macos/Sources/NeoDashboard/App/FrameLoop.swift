@@ -115,6 +115,9 @@ final class FrameLoop {
         let wantsClock = !tel.hasContent || env.forceClock
         let (clockMode, blackAlpha) = stepFade(wantsClock: wantsClock, now: now)
         let activeRenderer = self.renderer
+        // Capture from the main actor; the worker closure must not read
+        // @Published state off-thread.
+        let previewVisible = env.previewWindowVisible
 
         workQueue.async { [weak self] in
             guard let self else { return }
@@ -130,18 +133,22 @@ final class FrameLoop {
             }
             guard let base else { return }
             let raw = Self.applyBlackOverlay(base, alpha: blackAlpha) ?? base
-            // LCD gets the oriented frame; preview stays in the native
-            // landscape so the user can still read it on screen.
+            // LCD gets the oriented frame; preview always shows the raw
+            // landscape so the user can read it on screen. When nothing
+            // re-orients the frame (the common case), `lcdImg === raw` and
+            // we only need to JPEG-encode once.
             let lcdImg = Self.oriented(raw, rotation: rotation,
                                        flipH: flipH, flipV: flipV) ?? raw
             if pushToLCD, let jpeg = self.encoder.encode(lcdImg) {
                 _ = env.driver.send(jpeg)
             }
-            if let jpeg = self.encoder.encode(raw) {
-                _ = env.preview.send(jpeg)
-            }
-            Task { @MainActor in
-                env.updatePreview(image: raw)
+            // Preview CGImage update is throttled by whether the window
+            // is on-screen — when it's closed, nothing reads
+            // `lastFramePreview` so we skip the main-actor hop entirely.
+            if previewVisible {
+                Task { @MainActor in
+                    env.updatePreview(image: raw)
+                }
             }
         }
     }

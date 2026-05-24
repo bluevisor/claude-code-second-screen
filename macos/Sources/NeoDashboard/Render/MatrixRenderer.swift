@@ -257,18 +257,15 @@ final class MatrixRenderer {
                        position: capTopOrigin(rowMid: rowMid, font: sessFont, x: cx)) + 12
 
         // Right side — weekday + date.
-        let cal = Calendar(identifier: .gregorian)
-        let comps = cal.dateComponents([.weekday, .day, .month, .year], from: now)
         let weekdayStr: String = {
             let f = DateFormatter()
             f.dateFormat = "EEEE"
             return f.string(from: now).uppercased()
         }()
-        let dateText = String(format: "%@  %02d.%02d.%04d", weekdayStr,
-                              comps.month ?? 0, comps.day ?? 0, comps.year ?? 0)
-        let dateWidth = stringWidth(dateText, font: dateFont)
+        let dateString = "\(weekdayStr)  \(dateText(now))"
+        let dateWidth = stringWidth(dateString, font: dateFont)
         let dateX = rect.maxX - dateWidth
-        _ = drawText(ctx, dateText, font: dateFont, color: MatrixTheme.inkDim,
+        _ = drawText(ctx, dateString, font: dateFont, color: MatrixTheme.inkDim,
                      position: capTopOrigin(rowMid: rowMid, font: dateFont, x: dateX))
 
         // Separator gradient between left cluster and date.
@@ -426,7 +423,16 @@ final class MatrixRenderer {
         let vFont = MatrixTheme.font(10, weight: .bold)
         let vPillW = stringWidth(vText, font: vFont) + 14
         let nameMax = leftW - vPillW - 8
-        let nameDisp = elide(m.name, font: nameFont, maxW: nameMax)
+        // Prefer the full "CLAUDE SONNET 1M" — but if it doesn't fit,
+        // drop the "CLAUDE " prefix before falling back to ellipsis so
+        // the model family + tier are still legible.
+        let nameDisp: String = {
+            if stringWidth(m.name, font: nameFont) <= nameMax { return m.name }
+            let stripped = m.name.hasPrefix("CLAUDE ")
+                ? String(m.name.dropFirst("CLAUDE ".count))
+                : m.name
+            return elide(stripped, font: nameFont, maxW: nameMax)
+        }()
         let nw = drawText(ctx, nameDisp, font: nameFont, color: MatrixTheme.ink,
                           position: CGPoint(x: cx, y: cy))
         // Pill rectangle.
@@ -440,11 +446,25 @@ final class MatrixRenderer {
                                             x: vPill.minX + 7))
         cy += 32
 
-        // P50 / P95.
-        let sub = "P50 \(Int(m.p50ms))MS · P95 \(Int(m.p95ms))MS"
-        let subFont = MatrixTheme.font(11)
-        _ = drawText(ctx, elide(sub, font: subFont, maxW: leftW),
-                     font: subFont, color: MatrixTheme.inkDim,
+        // Thinking mode (replaces the old P50/P95 line — latency now
+        // lives in the response-time sparkline at the bottom of the
+        // panel). Models with a graded knob (Codex / o-series) show the
+        // effort string; Claude shows ON/OFF.
+        let (subLabel, subColor): (String, NSColor) = {
+            switch m.thinking {
+            case .effort(let level):
+                return ("THINKING · \(level.uppercased())", MatrixTheme.phosphor)
+            case .on:
+                return ("THINKING ON", MatrixTheme.phosphor)
+            case .off:
+                return ("THINKING OFF", MatrixTheme.inkDim)
+            case .unknown:
+                return ("THINKING —", MatrixTheme.inkFaint)
+            }
+        }()
+        let subFont = MatrixTheme.font(11, weight: .bold)
+        _ = drawText(ctx, elide(subLabel, font: subFont, maxW: leftW),
+                     font: subFont, color: subColor,
                      position: CGPoint(x: cx, y: cy))
         cy = max(cy + 16, badgeY + badgeH) + 14
 
@@ -458,7 +478,10 @@ final class MatrixRenderer {
             return "\(Int(m.contextMax / 1000))K"
         }()
         let cacheHitPct: Double = {
-            let denom = max(m.cacheReadTokens + m.inputTokens, 1)
+            // Denominator is total prompt tokens this session — fresh
+            // input + cache reads + cache writes. Omitting writes (the
+            // miss-and-seed path) inflates the hit rate to ~100%.
+            let denom = max(m.cacheReadTokens + m.inputTokens + m.cacheWriteTokens, 1)
             return m.cacheReadTokens / denom * 100
         }()
         let specs: [(String, String, String)] = [
@@ -742,69 +765,82 @@ final class MatrixRenderer {
         let m = tel.model
         let q = tel.quota
         var lx = rect.minX + 16
-        let ly = rect.midY + 4
+        // Center the clock digits optically inside the footer rect, then
+        // share that baseline with the small left/right stats so every
+        // element on the row sits on one common bottom baseline.
+        let smallFont = MatrixTheme.font(13)
+        let smallBoldFont = MatrixTheme.font(13, weight: .bold)
+        let clockFont = MatrixTheme.font(36, weight: .heavy)
+        let clockGlyphs = NSAttributedString(string: "0123456789:",
+                                             attributes: [.font: clockFont])
+        let tight = CTLineGetBoundsWithOptions(
+            CTLineCreateWithAttributedString(clockGlyphs), .useOpticalBounds)
+        let baseY = rect.midY + (tight.origin.y + tight.height / 2)
+        let smallTopY = baseY - smallFont.ascender
+        let clockTopY = baseY - clockFont.ascender
         let parts: [(String, String)] = [
             ("\(Int(m.lastRequestMs))", "ms last"),
             ("P95 ", "\(Int(m.p95ms))ms"),
             ("CACHE ",
              String(format: "%d%%", Int(m.cacheReadTokens
-                 / max(m.cacheReadTokens + m.inputTokens, 1) * 100))),
+                 / max(m.cacheReadTokens + m.inputTokens + m.cacheWriteTokens, 1) * 100))),
         ]
         for (a, b) in parts {
-            let aw = drawText(ctx, a, font: MatrixTheme.font(13, weight: .bold),
-                              color: MatrixTheme.phosphor, position: CGPoint(x: lx, y: ly))
+            let aw = drawText(ctx, a, font: smallBoldFont,
+                              color: MatrixTheme.phosphor,
+                              position: CGPoint(x: lx, y: smallTopY))
             lx += aw + 3
-            let bw = drawText(ctx, b, font: MatrixTheme.font(13),
-                              color: MatrixTheme.inkDim, position: CGPoint(x: lx, y: ly))
+            let bw = drawText(ctx, b, font: smallFont,
+                              color: MatrixTheme.inkDim,
+                              position: CGPoint(x: lx, y: smallTopY))
             lx += bw + 18
         }
 
-        // Clock (center).
+        // Clock (center). User chooses 12h / 24h; the AM/PM suffix sits
+        // beside the digits in 12h mode.
         let cal = Calendar.current
         let comps = cal.dateComponents([.hour, .minute, .second], from: now)
-        let hh = String(format: "%02d", comps.hour ?? 0)
+        let h: String = {
+            switch UserPrefs.timeFormat {
+            case .h24: return String(format: "%02d", comps.hour ?? 0)
+            case .h12: return String(((comps.hour ?? 0) + 11) % 12 + 1)
+            }
+        }()
         let mm = String(format: "%02d", comps.minute ?? 0)
         let ss = String(format: "%02d", comps.second ?? 0)
         let colon = (comps.second ?? 0).isMultiple(of: 2) ? ":" : " "
-        let clockFont = MatrixTheme.font(36, weight: .heavy)
-        let hw = stringWidth(hh, font: clockFont)
-        let cw = stringWidth(colon, font: clockFont)
-        let mw = stringWidth(mm, font: clockFont)
-        let sw = stringWidth(ss, font: clockFont)
-        let total = hw + cw + mw + cw + sw
+        let clockParts = [h, colon, mm, colon, ss]
+        let widths = clockParts.map { stringWidth($0, font: clockFont) }
+        let total = widths.reduce(0, +)
         var x = rect.midX - total / 2
-        // Center glyphs by their tight bounding box. CT uses a baseline-origin
-        // y-up rect: origin.y is the distance from baseline to the bottom of
-        // the inked box (≥ 0 for ASCII digits). In our flipped y-down canvas
-        // the baseline therefore sits *below* the visual center by that span.
-        let glyphSample = NSAttributedString(string: "0123456789:",
-                                             attributes: [.font: clockFont])
-        let glyphLine = CTLineCreateWithAttributedString(glyphSample)
-        let tight = CTLineGetBoundsWithOptions(glyphLine, .useOpticalBounds)
-        let baselineY = rect.midY + (tight.origin.y + tight.height / 2)
-        for part in [hh, colon, mm, colon, ss] {
+        for (part, w) in zip(clockParts, widths) {
             _ = drawText(ctx, part, font: clockFont, color: MatrixTheme.ink,
-                         position: CGPoint(x: x, y: baselineY - clockFont.ascender))
-            x += stringWidth(part, font: clockFont)
+                         position: CGPoint(x: x, y: clockTopY))
+            x += w
+        }
+        // AM / PM suffix beside the clock in 12-hour mode.
+        let ampm = amPm(now)
+        if !ampm.isEmpty {
+            _ = drawText(ctx, ampm, font: smallBoldFont, color: MatrixTheme.inkDim,
+                         position: CGPoint(x: x + 6, y: smallTopY))
         }
 
         // Right stats. Weather replaces the legacy UTC-offset chip; until
         // the first network refresh succeeds we show a placeholder.
         let weatherText = (WeatherService.shared.summary ?? "—").uppercased()
         var rx = rect.maxX - 16
-        let rf = MatrixTheme.font(13)
         if !MatrixTheme.isSubscriptionPlan(q.plan) {
             let cost = q.windows.first?.costUSD ?? 0
             let txt = String(format: "5H  $%.2f", cost)
-            let cw2 = stringWidth(txt, font: MatrixTheme.font(13, weight: .bold))
-            _ = drawText(ctx, txt, font: MatrixTheme.font(13, weight: .bold),
+            let cw2 = stringWidth(txt, font: smallBoldFont)
+            _ = drawText(ctx, txt, font: smallBoldFont,
                          color: MatrixTheme.phosphor,
-                         position: CGPoint(x: rx - cw2, y: ly))
+                         position: CGPoint(x: rx - cw2, y: smallTopY))
             rx -= cw2 + 16
         }
-        let weatherW = stringWidth(weatherText, font: rf)
-        _ = drawText(ctx, weatherText, font: rf, color: MatrixTheme.inkDim,
-                     position: CGPoint(x: rx - weatherW, y: ly))
+        let weatherW = stringWidth(weatherText, font: smallFont)
+        _ = drawText(ctx, weatherText, font: smallFont, color: MatrixTheme.inkDim,
+                     position: CGPoint(x: rx - weatherW, y: smallTopY))
     }
 
     // MARK: - Generic helpers

@@ -104,15 +104,12 @@ final class ClockRenderer: FrameRenderer {
     }
 
     private func dateLabel(now: Date) -> String {
-        let cal = Calendar(identifier: .gregorian)
-        let comps = cal.dateComponents([.weekday, .day, .month, .year], from: now)
         let weekday: String = {
             let f = DateFormatter()
             f.dateFormat = "EEEE"
             return f.string(from: now).uppercased()
         }()
-        return String(format: "%@  %02d.%02d.%04d", weekday,
-                      comps.month ?? 0, comps.day ?? 0, comps.year ?? 0)
+        return "\(weekday)  \(dateText(now))"
     }
 
     // MARK: - Background
@@ -188,21 +185,23 @@ final class ClockRenderer: FrameRenderer {
     private func drawClock(into ctx: CGContext, now: Date, blink: Double) {
         let cal = Calendar(identifier: .gregorian)
         let comps = cal.dateComponents([.hour, .minute, .second], from: now)
-        let hh = String(format: "%02d", comps.hour ?? 0)
+        let format = UserPrefs.timeFormat
+        let hourPart: String
+        switch format {
+        case .h24: hourPart = String(format: "%02d", comps.hour ?? 0)
+        case .h12: hourPart = String(((comps.hour ?? 0) + 11) % 12 + 1)
+        }
         let mm = String(format: "%02d", comps.minute ?? 0)
         let ss = String(format: "%02d", comps.second ?? 0)
         let blinkOn = (comps.second ?? 0).isMultiple(of: 2)
         let colon = blinkOn ? ":" : " "
 
         let bigFont = MatrixTheme.font(150, weight: .heavy)
-        let parts = [hh, colon, mm, colon, ss]
+        let parts = [hourPart, colon, mm, colon, ss]
         let widths = parts.map { stringWidth($0, font: bigFont) }
         let total = widths.reduce(0, +)
         var x = (size.width - total) / 2
-        let digitLeft = x
 
-        // Vertically centre using tight cap bounds — keeps the digits
-        // visually centred without descender drift.
         let sample = NSAttributedString(string: "0123456789:",
                                         attributes: [.font: bigFont])
         let tight = CTLineGetBoundsWithOptions(
@@ -215,16 +214,21 @@ final class ClockRenderer: FrameRenderer {
                          position: CGPoint(x: x, y: topY))
             x += w
         }
-        drawDigitScanlines(into: ctx,
-                           rect: CGRect(x: digitLeft, y: topY,
-                                        width: total,
-                                        height: bigFont.ascender - bigFont.descender))
 
-        // Secondary label below the clock.
-        let cal12 = ((comps.hour ?? 0) + 11) % 12 + 1
-        let ampm = (comps.hour ?? 0) >= 12 ? "PM" : "AM"
-        let sub = String(format: "%02d:%02d %@", cal12, comps.minute ?? 0, ampm)
+        // Secondary label below — AM/PM in 12h mode, weekday otherwise.
         let subFont = MatrixTheme.font(18, weight: .bold)
+        let sub: String = {
+            switch format {
+            case .h12:
+                let h12 = ((comps.hour ?? 0) + 11) % 12 + 1
+                return String(format: "%02d:%02d %@", h12,
+                              comps.minute ?? 0, amPm(now))
+            case .h24:
+                let f = DateFormatter()
+                f.dateFormat = "EEEE"
+                return f.string(from: now).uppercased()
+            }
+        }()
         let sw = stringWidth(sub, font: subFont)
         _ = drawText(ctx, sub, font: subFont, color: MatrixTheme.inkFaint,
                      position: CGPoint(x: size.width / 2 - sw / 2,
@@ -240,23 +244,6 @@ final class ClockRenderer: FrameRenderer {
         while y < size.height {
             ctx.fill(CGRect(x: 0, y: y, width: size.width, height: 1))
             y += 2
-        }
-        ctx.restoreGState()
-    }
-
-    private func drawDigitScanlines(into ctx: CGContext, rect: CGRect) {
-        let clipped = rect.intersection(CGRect(origin: .zero, size: size))
-        guard !clipped.isNull, clipped.width > 0, clipped.height > 0 else { return }
-        ctx.saveGState()
-        ctx.addRect(clipped)
-        ctx.clip()
-        ctx.setShouldAntialias(false)
-        ctx.setBlendMode(.normal)
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.34).cgColor)
-        var y = floor(clipped.minY / 6) * 6
-        while y < clipped.maxY {
-            ctx.fill(CGRect(x: clipped.minX, y: y, width: clipped.width, height: 2))
-            y += 6
         }
         ctx.restoreGState()
     }

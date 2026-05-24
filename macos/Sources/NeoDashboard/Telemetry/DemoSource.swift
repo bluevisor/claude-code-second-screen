@@ -50,6 +50,8 @@ final class DemoSource: TelemetrySource {
             QuotaWindow(label: "7D", used: 197_370_000, cap: 500_000_000,
                         costUSD: 458.05, resetInSec: 7 * 86400),
         ]
+        t.model.thinking = .effort("xhigh")
+        t.hasContent = true
         tel = t
     }
 

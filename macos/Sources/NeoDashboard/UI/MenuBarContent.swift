@@ -86,74 +86,44 @@ struct MenuBarContent: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sourceRow
-            if env.mode == .matrixDashboard {
-                Toggle("Matrix rain", isOn: $env.showRain)
-                    .toggleStyle(.switch)
-                    .font(.callout)
-                    .onChange(of: env.showRain) { _, _ in env.loop?.reconfigure() }
-            }
+            themeRow
         }
     }
 
-    private var sourceRow: some View {
+    /// Theme picker — the single most-used control. Source + display
+    /// tuning live in the preview window's gear popover now.
+    private var themeRow: some View {
         HStack(spacing: 8) {
-            Text("Source")
+            Text("Theme")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: 56, alignment: .leading)
             Menu {
-                Button {
-                    env.sourceSelection = .auto
-                } label: {
-                    Label("Auto (active session)", systemImage: "wand.and.stars")
-                }
-                Button {
-                    env.sourceSelection = .claudeCode
-                } label: {
-                    Label("Claude Code", systemImage: "terminal")
-                }
-                Button {
-                    env.sourceSelection = .codex
-                } label: {
-                    Label("Codex", systemImage: "command")
-                }
-                Button {
-                    env.sourceSelection = .agy
-                } label: {
-                    Label("AGY", systemImage: "network")
-                }
-                Button {
-                    env.sourceSelection = .demo
-                } label: {
-                    Label("Demo", systemImage: "theatermasks")
-                }
-                if !env.activeSessions.isEmpty {
-                    Section("Active sessions") {
-                        ForEach(env.activeSessions) { s in
-                            Button {
-                                env.sourceSelection = .session(s)
-                            } label: {
-                                sessionLabel(s)
-                            }
-                        }
+                ForEach(AppEnvironment.RenderMode.allCases) { m in
+                    Button {
+                        env.mode = m
+                        env.loop?.reconfigure()
+                    } label: {
+                        Label(m.rawValue, systemImage: themeSymbol(m))
                     }
                 }
             } label: {
-                Label(env.sourceSelection.label,
-                      systemImage: env.sourceSelection.symbol)
+                Label(env.mode.rawValue, systemImage: themeSymbol(env.mode))
                     .font(.callout)
             }
             .menuStyle(.borderlessButton)
         }
     }
 
-    @ViewBuilder
-    private func sessionLabel(_ s: ActiveSession) -> some View {
-        let mins = max(0, Int(Date.now.timeIntervalSince1970 - s.updatedAt) / 60)
-        let agoText = s.busy ? "● busy" : (mins == 0 ? "just now" : "\(mins)m ago")
-        Label("\(s.kind.label) · \(s.displayName)  ·  \(agoText)",
-              systemImage: s.busy ? "circle.fill" : s.kind.symbol)
+    private func themeSymbol(_ mode: AppEnvironment.RenderMode) -> String {
+        switch mode {
+        case .matrixDashboard: return "terminal"
+        case .cozy: return "leaf"
+        case .wowAlliance: return "shield.lefthalf.filled"
+        case .wowHorde: return "flame"
+        case .animalCrossing: return "tree"
+        case .dragonball: return "circle.hexagongrid"
+        }
     }
 
     // MARK: - Footer
