@@ -171,22 +171,32 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
 
     @discardableResult
     func send(_ jpeg: Data) -> Bool {
-        guard device != nil else { return false }
+        guard let dev = device else { return false }
         let (w, h) = resolution
         let packet = TRCCFraming.buildFramePacket(jpeg: jpeg, width: w, height: h)
-        // The packet length is always a multiple of 512; chunk into output reports.
-        var offset = 0
-        while offset < packet.count {
-            let end = min(offset + Self.chunkSize, packet.count)
-            let chunk = packet.subdata(in: offset..<end)
-            do {
-                try setOutputReport(chunk, reportID: 0)
-            } catch {
-                logger.error("send failed at offset \(offset)/\(packet.count): \(error.localizedDescription, privacy: .public)")
+        // The packet length is always a multiple of 512; chunk into
+        // output reports. Enter `withUnsafeBytes` once and pass offset
+        // pointers to IOHIDDeviceSetReport — the previous loop did
+        // `packet.subdata(in:)` per chunk, allocating ~160 fresh Data
+        // copies of the JPEG payload per frame.
+        let ok = packet.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return false
             }
-            offset = end
+            var offset = 0
+            while offset < packet.count {
+                let len = min(Self.chunkSize, packet.count - offset)
+                let r = IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0,
+                                             base.advanced(by: offset), len)
+                if r != kIOReturnSuccess {
+                    logger.error("send failed at offset \(offset)/\(packet.count): IOHIDDeviceSetReport returned \(String(format: "0x%08x", r), privacy: .public)")
+                    return false
+                }
+                offset += len
+            }
+            return true
         }
+        guard ok else { return false }
         // Match the C# inter-frame sleep so the firmware can flush.
         try? Thread.sleep(forSeconds: 0.001)
         return true
