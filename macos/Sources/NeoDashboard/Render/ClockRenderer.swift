@@ -26,7 +26,8 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
         self.rain = RainPainter(canvasSize: size, stepHz: 30)
     }
 
-    func render(_ telemetry: Telemetry, blink: Double, now: Date) -> CGImage? {
+    func render(_ telemetry: Telemetry, blink: Double, now: Date,
+                blackAlpha: Double = 0) -> CGImage? {
         guard let ctx = CGContext(
             data: nil,
             width: Int(size.width), height: Int(size.height),
@@ -62,6 +63,14 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
         drawScanlines(into: ctx, opacity: 0.78)
         drawClock(into: ctx, now: now, blink: blink)
         drawVignette(into: ctx, strength: 0.42)
+
+        // Fade overlay before CRT — matches FrameLoop's old post-process
+        // semantics but folded into the existing context.
+        if blackAlpha > 0 {
+            ctx.setFillColor(NSColor.black.withAlphaComponent(
+                min(1, max(0, CGFloat(blackAlpha)))).cgColor)
+            ctx.fill(CGRect(origin: .zero, size: size))
+        }
 
         guard let raw = ctx.makeImage() else { return nil }
         return crt.process(raw) ?? raw

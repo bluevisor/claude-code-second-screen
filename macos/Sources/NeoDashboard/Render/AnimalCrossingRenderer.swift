@@ -31,7 +31,8 @@ final class AnimalCrossingRenderer: FrameRenderer, @unchecked Sendable {
         self.size = size
     }
 
-    func render(_ tel: Telemetry, blink: Double, now: Date) -> CGImage? {
+    func render(_ tel: Telemetry, blink: Double, now: Date,
+                blackAlpha: Double = 0) -> CGImage? {
         guard let ctx = CGContext(
             data: nil,
             width: Int(size.width), height: Int(size.height),
@@ -105,12 +106,13 @@ final class AnimalCrossingRenderer: FrameRenderer, @unchecked Sendable {
                           palette: palette, tel: tel)
         drawStatsColumn(ctx, rect: statsRect, palette: palette, tel: tel)
 
+        applyFade(into: ctx, alpha: blackAlpha)
         return ctx.makeImage()
     }
 
     /// Themed idle/clock view — keeps the wood plank backdrop and the
     /// cream paper card, swapping the body for a huge rounded HH:MM.
-    func renderClock(blink: Double, now: Date) -> CGImage? {
+    func renderClock(blink: Double, now: Date, blackAlpha: Double = 0) -> CGImage? {
         guard let ctx = CGContext(
             data: nil,
             width: Int(size.width), height: Int(size.height),
@@ -186,7 +188,17 @@ final class AnimalCrossingRenderer: FrameRenderer, @unchecked Sendable {
         textBaselineMid(ctx, nap, font: napFont, color: palette.dim,
                         x: size.width / 2 - napW / 2, midY: bodyMid + 110)
 
+        applyFade(into: ctx, alpha: blackAlpha)
         return ctx.makeImage()
+    }
+
+    /// Translucent black overlay used by FrameLoop's fade transitions.
+    /// No-op when `alpha == 0`.
+    private func applyFade(into ctx: CGContext, alpha: Double) {
+        guard alpha > 0 else { return }
+        ctx.setFillColor(NSColor.black.withAlphaComponent(
+            min(1, max(0, CGFloat(alpha)))).cgColor)
+        ctx.fill(CGRect(origin: .zero, size: size))
     }
 
     // MARK: - Backdrop

@@ -152,13 +152,15 @@ final class FrameLoop {
             if clockMode {
                 // Prefer the active renderer's themed clock; fall back to
                 // the generic phosphor one if it doesn't override.
-                base = activeRenderer.renderClock(blink: phase, now: now)
-                    ?? clockRenderer.render(tel, blink: phase, now: now)
+                base = activeRenderer.renderClock(blink: phase, now: now,
+                                                  blackAlpha: blackAlpha)
+                    ?? clockRenderer.render(tel, blink: phase, now: now,
+                                            blackAlpha: blackAlpha)
             } else {
-                base = activeRenderer.render(tel, blink: phase, now: now)
+                base = activeRenderer.render(tel, blink: phase, now: now,
+                                             blackAlpha: blackAlpha)
             }
-            guard let base else { return }
-            let raw = Self.applyBlackOverlay(base, alpha: blackAlpha) ?? base
+            guard let raw = base else { return }
             // LCD gets the oriented frame; preview always shows the raw
             // landscape so the user can read it on screen. When nothing
             // re-orients the frame (the common case), `lcdImg === raw` and
@@ -226,27 +228,6 @@ final class FrameLoop {
             }
             return (currentIsClock, 1 - progress)
         }
-    }
-
-    /// Composite a black rectangle of the given alpha over the source —
-    /// used by the fade transitions. Returns nil only on allocation
-    /// failure; callers fall back to the source image.
-    nonisolated private static func applyBlackOverlay(_ src: CGImage, alpha: Double) -> CGImage? {
-        guard alpha > 0 else { return src }
-        let w = src.width, h = src.height
-        guard let ctx = CGContext(
-            data: nil,
-            width: w, height: h,
-            bitsPerComponent: 8, bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
-        let rect = CGRect(x: 0, y: 0, width: w, height: h)
-        ctx.draw(src, in: rect)
-        ctx.setFillColor(NSColor.black.withAlphaComponent(min(1, max(0, alpha))).cgColor)
-        ctx.fill(rect)
-        return ctx.makeImage()
     }
 
     /// Apply rotation + flip to the rendered canvas. Returns nil only on a

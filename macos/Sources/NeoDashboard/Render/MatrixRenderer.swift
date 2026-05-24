@@ -100,7 +100,10 @@ final class MatrixRenderer: @unchecked Sendable {
 
     /// Render one frame and return the resulting CGImage. `blink` is a
     /// monotonically-increasing phase used for the caret + scan animations.
-    func render(_ tel: Telemetry, blink: Double, now: Date) -> CGImage? {
+    /// `blackAlpha` (0…1) overlays a translucent black fill on top of the
+    /// composite — used by FrameLoop's fade machine.
+    func render(_ tel: Telemetry, blink: Double, now: Date,
+                blackAlpha: Double = 0) -> CGImage? {
         guard let ctx = CGContext(
             data: nil,
             width: Int(size.width),
@@ -128,8 +131,23 @@ final class MatrixRenderer: @unchecked Sendable {
         drawScanlines(into: ctx, opacity: 0.78)
         drawVignette(into: ctx, strength: 0.42)
 
+        // Fade overlay (if active) goes on top before CRT so it darkens
+        // the chromatic-aberration pass too — visually identical to the
+        // old post-process step that wrapped the final image.
+        applyFade(into: ctx, alpha: blackAlpha)
+
         guard let raw = ctx.makeImage() else { return nil }
         return crt.process(raw) ?? raw
+    }
+
+    /// Composite a translucent black fill across the whole canvas. Caller
+    /// passes `0` to skip; we still no-op explicitly so the cheap path is
+    /// `alpha > 0` check, no GState push.
+    private func applyFade(into ctx: CGContext, alpha: Double) {
+        guard alpha > 0 else { return }
+        ctx.setFillColor(NSColor.black.withAlphaComponent(
+            min(1, max(0, CGFloat(alpha)))).cgColor)
+        ctx.fill(CGRect(origin: .zero, size: size))
     }
 
     // MARK: - Layouts
