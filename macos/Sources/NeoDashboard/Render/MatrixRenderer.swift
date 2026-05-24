@@ -68,6 +68,28 @@ final class MatrixRenderer: @unchecked Sendable {
                    locations: [0, 1])!
     }()
 
+    /// Pre-baked scanline strap — 1px black rows every 2px at the
+    /// renderer's only caller-opacity (0.78), composited as a single
+    /// `ctx.draw` per frame instead of ~240 (landscape) or ~640
+    /// (portrait) `ctx.fill` calls.
+    private lazy var scanlineImage: CGImage? = {
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.30 * 0.78).cgColor)
+        var y: CGFloat = 0
+        while y < size.height {
+            ctx.fill(CGRect(x: 0, y: y, width: size.width, height: 1))
+            y += 2
+        }
+        return ctx.makeImage()
+    }()
+
     init(size: CGSize = MatrixTheme.canvasSize,
          showRain: Bool = true,
          rainFPS: Double = 12) {
@@ -228,15 +250,19 @@ final class MatrixRenderer: @unchecked Sendable {
     }
 
     private func drawScanlines(into ctx: CGContext, opacity: CGFloat) {
+        // Opacity is preserved on the signature but unused — the only
+        // caller passes 0.78, baked into `scanlineImage`. If we ever
+        // need variable opacity, fall back to the per-row fill loop.
+        _ = opacity
+        guard let img = scanlineImage else { return }
+        // `ctx` is already y-flipped (screen coords). A naive
+        // `ctx.draw(img, in:)` would render the image upside-down;
+        // counter-flip locally so image y=0 lands at screen y=0 — same
+        // pattern ClockRenderer uses for its cached static layer.
         ctx.saveGState()
-        // Slightly more punch per line (was 0.22) so the strap pattern
-        // reads as a real CRT effect, not a faint hint.
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.30 * opacity).cgColor)
-        var y: CGFloat = 0
-        while y < size.height {
-            ctx.fill(CGRect(x: 0, y: y, width: size.width, height: 1))
-            y += 2
-        }
+        ctx.translateBy(x: 0, y: size.height)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: size.width, height: size.height))
         ctx.restoreGState()
     }
 
