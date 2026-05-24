@@ -4,6 +4,7 @@
 // conditions come from Open-Meteo. Renderers read the latest summary
 // synchronously from a thread-safe property.
 
+import AppKit
 import CoreLocation
 import Foundation
 import os
@@ -34,6 +35,20 @@ final class WeatherService: @unchecked Sendable {
     private let locator = SystemLocator()
     private static let placeTTL: TimeInterval = 60 * 60
 
+    private init() {
+        // When the user finally clicks Allow, drop the cached IP-based
+        // place and trigger an immediate refresh so the LCD swaps to
+        // the real location within seconds instead of the next 10-min
+        // tick.
+        locator.onAuthorizationGranted = { [weak self] in
+            self?.state.withLock { s in
+                s.place = nil
+                s.placeFetchedAt = 0
+                s.refreshRequested = true
+            }
+        }
+    }
+
     /// Most recent "CITY, ST · 72°F · CLEAR" formatted string. Nil until the
     /// first successful refresh.
     var summary: String? {
@@ -57,6 +72,16 @@ final class WeatherService: @unchecked Sendable {
     /// notices (≤ 10 s latency).
     func refreshNow() {
         state.withLock { $0.refreshRequested = true }
+    }
+
+    /// Drop any IP-based/stale place cache so the next refresh goes
+    /// back through CoreLocation and can surface the system prompt.
+    func requestPreciseLocationNow() {
+        state.withLock { s in
+            s.place = nil
+            s.placeFetchedAt = 0
+            s.refreshRequested = true
+        }
     }
 
     // MARK: - Loop
@@ -121,7 +146,8 @@ final class WeatherService: @unchecked Sendable {
         }
 
         let place: ResolvedPlace
-        if let coords = await locator.requestLocation() {
+        let (coords, why) = await locator.requestLocationWithReason()
+        if let coords {
             let (city, region) = await reverseGeocode(coords)
             place = ResolvedPlace(city: city.uppercased(),
                                   region: region.uppercased(),
@@ -129,6 +155,7 @@ final class WeatherService: @unchecked Sendable {
                                   longitude: coords.coordinate.longitude)
             logger.info("CoreLocation: \(place.city, privacy: .public), \(place.region, privacy: .public)")
         } else {
+            logger.info("CoreLocation unavailable (\(why, privacy: .public)) — falling back to IP")
             // Fall back to IP geolocation. Lower accuracy (city-level
             // routing, often off by ~10 mi) but works without permission.
             let ip = try await fetchIPLocation()
@@ -239,12 +266,25 @@ final class WeatherService: @unchecked Sendable {
 private final class SystemLocator: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
     private let manager: CLLocationManager
     private let lock = OSAllocatedUnfairLock(initialState: State())
-    private static let timeout: TimeInterval = 8
+    /// Bound on a single resolution attempt once authorization is in
+    /// hand. We use a much longer ceiling (`firstAuthTimeout`) while
+    /// waiting on the permission alert so the user actually has time
+    /// to click before we abandon the call.
+    private static let timeout: TimeInterval = 12
+    private static let firstAuthTimeout: TimeInterval = 120
+    private let logger = Logger(subsystem: "tech.bluevisor.NeoDashboard",
+                                category: "Locator")
+    /// Called once on the main thread the first time CoreLocation
+    /// authorization transitions to `.authorized`. WeatherService wires
+    /// it to `refreshNow()` so the LCD updates from the IP-fallback
+    /// city to the real one as soon as the user clicks Allow.
+    var onAuthorizationGranted: (@Sendable () -> Void)?
 
     private struct State {
         var continuation: CheckedContinuation<CLLocation?, Never>?
         var didRequest = false
         var timeoutToken = 0
+        var notifiedGrant = false
     }
 
     override init() {
@@ -258,20 +298,44 @@ private final class SystemLocator: NSObject, CLLocationManagerDelegate, @uncheck
         }
         self.manager = m
         super.init()
-        DispatchQueue.main.async { [self] in
-            manager.delegate = self
-            manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        if Thread.isMainThread {
+            configureManager()
+        } else {
+            DispatchQueue.main.sync { [self] in
+                configureManager()
+            }
         }
     }
 
+    private func configureManager() {
+        manager.delegate = self
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+    }
+
     func requestLocation() async -> CLLocation? {
+        await requestLocationWithReason().location
+    }
+
+    /// Same as `requestLocation` but returns a tag describing why a
+    /// location wasn't returned (used for diagnostic logging when the
+    /// caller has to fall back to IP geolocation).
+    func requestLocationWithReason() async -> (location: CLLocation?, reason: String) {
         // `locationServicesEnabled()` can block — keep it off the main
         // queue. It's safe to call from any thread.
-        if !CLLocationManager.locationServicesEnabled() { return nil }
-        return await withCheckedContinuation { (cont: CheckedContinuation<CLLocation?, Never>) in
+        if !CLLocationManager.locationServicesEnabled() {
+            return (nil, "system Location Services disabled")
+        }
+        // Pick the timeout up front: when auth is .notDetermined the
+        // user needs time to find and click the permission alert. Once
+        // authorized, real fixes resolve in well under a second.
+        let initialStatus: CLAuthorizationStatus = await MainActor.run {
+            manager.authorizationStatus
+        }
+        let attemptTimeout: TimeInterval = (initialStatus == .notDetermined)
+            ? Self.firstAuthTimeout
+            : Self.timeout
+        let result: CLLocation? = await withCheckedContinuation { (cont: CheckedContinuation<CLLocation?, Never>) in
             let token: Int? = lock.withLock { s -> Int? in
-                // Coalesce — refuse a second concurrent fix so the
-                // caller can fall back to IP rather than queue forever.
                 if s.continuation != nil { return nil }
                 s.continuation = cont
                 s.didRequest = false
@@ -283,18 +347,47 @@ private final class SystemLocator: NSObject, CLLocationManagerDelegate, @uncheck
                 return
             }
             DispatchQueue.main.async { [weak self] in self?.kickoff() }
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.timeout) { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + attemptTimeout) { [weak self] in
                 self?.timeoutFire(token: token)
             }
         }
+        if let result { return (result, "ok") }
+        // Sample the authorisation state on the main thread so the log
+        // line is meaningful (denied vs not-determined vs timed-out).
+        let status: CLAuthorizationStatus = await MainActor.run {
+            manager.authorizationStatus
+        }
+        let reason: String
+        switch status {
+        case .notDetermined: reason = "auth notDetermined after \(Int(attemptTimeout))s — prompt never resolved"
+        case .denied:        reason = "auth denied — enable in System Settings → Privacy & Security → Location Services"
+        case .restricted:    reason = "auth restricted by parental controls / MDM"
+        case .authorized, .authorizedAlways: reason = "authorized but no fix within \(Int(attemptTimeout))s"
+        @unknown default:    reason = "unknown auth status"
+        }
+        return (nil, reason)
     }
 
     /// Main-thread only.
     private func kickoff() {
-        switch manager.authorizationStatus {
+        let status = manager.authorizationStatus
+        let statusName = authString(status)
+        logger.info("kickoff: authStatus=\(statusName, privacy: .public)")
+        switch status {
         case .notDetermined:
+            // CoreLocationAgent will only surface its prompt for an
+            // application that is "regular" enough to be activatable.
+            // NeoDashboard is LSUIElement / `.accessory` by default, so
+            // `NSApp.activate` is a no-op — the prompt is generated but
+            // never displayed and the auth status sticks at
+            // `.notDetermined` forever. Briefly flip to `.regular` so
+            // the prompt actually shows, then restore the policy after
+            // the user has had time to respond.
+            promoteForAuthPrompt()
+            logger.info("calling requestWhenInUseAuthorization (LSUIElement → temporarily .regular)")
             manager.requestWhenInUseAuthorization()
         case .restricted, .denied:
+            logger.info("auth not available (\(statusName, privacy: .public)) — resolving nil")
             resume(nil)
         case .authorized, .authorizedAlways:
             startRequest()
@@ -303,7 +396,50 @@ private final class SystemLocator: NSObject, CLLocationManagerDelegate, @uncheck
         }
     }
 
-    /// Main-thread only.
+    /// Save the current activation policy, switch to `.regular` so the
+    /// CoreLocationAgent prompt can attach to us, then schedule a
+    /// restore once the user has plausibly had time to respond.
+    private func promoteForAuthPrompt() {
+        MainActor.assumeIsolated {
+            let previous = NSApp.activationPolicy()
+            if previous != .regular {
+                NSApp.setActivationPolicy(.regular)
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            // Restore the policy after the prompt has had a chance to be
+            // dismissed — long enough that flipping back doesn't kill the
+            // CoreLocationAgent alert, short enough that we don't leave a
+            // stray Dock icon around for the whole session.
+            if previous != .regular {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 90) {
+                    MainActor.assumeIsolated {
+                        // Only restore if no other Locator caller has
+                        // promoted us in the meantime.
+                        if NSApp.activationPolicy() == .regular {
+                            NSApp.setActivationPolicy(previous)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func authString(_ status: CLAuthorizationStatus) -> String {
+        switch status {
+        case .notDetermined: return "notDetermined"
+        case .restricted: return "restricted"
+        case .denied: return "denied"
+        case .authorized: return "authorized"
+        case .authorizedAlways: return "authorizedAlways"
+        @unknown default: return "unknown(\(status.rawValue))"
+        }
+    }
+
+    /// Main-thread only. Issues `manager.requestLocation()` exactly
+    /// once per pending fix. Authorization must already be granted —
+    /// calling this while `.notDetermined` causes an immediate
+    /// `kCLErrorDenied` from CoreLocation and resumes the continuation
+    /// with nil.
     private func startRequest() {
         let already = lock.withLock { s -> Bool in
             if s.didRequest { return true }
@@ -335,8 +471,21 @@ private final class SystemLocator: NSObject, CLLocationManagerDelegate, @uncheck
     // MARK: CLLocationManagerDelegate (called on main, the manager's queue)
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        switch manager.authorizationStatus {
+        let status = manager.authorizationStatus
+        let statusName = self.authString(status)
+        logger.info("auth changed: \(statusName, privacy: .public)")
+        switch status {
         case .authorized, .authorizedAlways:
+            // Fire the one-shot grant notification so WeatherService can
+            // schedule an immediate refresh — even if the current call
+            // already timed out, the user still gets accurate weather
+            // within seconds of clicking Allow.
+            let shouldNotify = lock.withLock { s -> Bool in
+                if s.notifiedGrant { return false }
+                s.notifiedGrant = true
+                return true
+            }
+            if shouldNotify { onAuthorizationGranted?() }
             startRequest()
         case .denied, .restricted:
             resume(nil)
@@ -349,11 +498,20 @@ private final class SystemLocator: NSObject, CLLocationManagerDelegate, @uncheck
 
     func locationManager(_ manager: CLLocationManager,
                          didUpdateLocations locations: [CLLocation]) {
+        logger.info("didUpdateLocations: \(locations.count) location(s)")
         resume(locations.last)
     }
 
     func locationManager(_ manager: CLLocationManager,
                          didFailWithError error: Error) {
+        let status = manager.authorizationStatus
+        let statusName = self.authString(status)
+        logger.warning("didFailWithError: \(error.localizedDescription, privacy: .public) (auth=\(statusName, privacy: .public))")
+        // While auth is still pending, ignore the immediate
+        // `kCLErrorDenied` that CoreLocation surfaces in response to a
+        // stale request — the user hasn't decided yet and the next
+        // auth-change callback will re-issue the fix.
+        if status == .notDetermined { return }
         resume(nil)
     }
 }

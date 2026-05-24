@@ -382,22 +382,26 @@ final class ClaudeCodeSource: TelemetrySource {
             log: log,
             subAgents: subs
         )
-        // Thinking detection — Claude's `/effort` setting
-        // (low/medium/high/xhigh/max/auto) is a per-request
-        // `thinking.budget_tokens` parameter sent to the API; it is
-        // never echoed back into the jsonl. We tried inferring effort
-        // from emitted thinking-text length, but that lies in both
-        // directions (a short response on xhigh looks "low"; the model
-        // can also burn the full budget regardless of setting). Surface
-        // ON/OFF only, which is something we can actually verify.
-        var thinking: ThinkingMode = .off
-        for ev in events.suffix(40).reversed() where ev.type == "assistant" {
-            if let content = ev.message["content"] as? [[String: Any]],
-               content.contains(where: { ($0["type"] as? String) == "thinking" }) {
-                thinking = .on
-                break
+        // Thinking detection — Claude's `/thinking` slash command writes
+        // its confirmation as a user event whose content contains
+        // `<local-command-stdout>Effort level set to X</local-command-stdout>`.
+        // That's the source of truth (the budget_tokens parameter on
+        // the API request is not echoed back into the jsonl). Walk
+        // back from the latest event so the most recent `/thinking`
+        // call wins. Fall through to ON/OFF based on the presence of
+        // thinking blocks when no explicit marker is found.
+        let thinking: ThinkingMode = {
+            if let level = parseExplicitEffort(events: events) {
+                return .effort(level)
             }
-        }
+            for ev in events.suffix(40).reversed() where ev.type == "assistant" {
+                if let content = ev.message["content"] as? [[String: Any]],
+                   content.contains(where: { ($0["type"] as? String) == "thinking" }) {
+                    return .on
+                }
+            }
+            return .off
+        }()
         // Append " 1M" to the display name when the context window
         // appears to be the extended-context variant. We infer that from
         // contextMax having been bumped past 200K above (driven by token
@@ -653,6 +657,42 @@ extension ClaudeCodeSource {
 // (Removed `inferThinkingEffort` heuristic — it was guessing the
 // /effort setting from observed thinking-text length, which is not
 // reliable in either direction. See comment in `buildTelemetry`.)
+
+/// Scans recent user events for the `/thinking` slash command's stdout
+/// marker (`<local-command-stdout>Effort level set to X</local-command-stdout>`)
+/// and returns the last-set effort string (e.g. "auto", "high"). Returns
+/// nil when no marker is present in the visible event window.
+private func parseExplicitEffort(events: [Event]) -> String? {
+    // Walk most-recent-first. The `/thinking` command can be re-issued
+    // mid-session, so the latest invocation is what's currently active.
+    for ev in events.reversed() where ev.type == "user" {
+        let text = effortMarkerText(ev.message)
+        guard !text.isEmpty,
+              let range = text.range(of: "Effort level set to ") else { continue }
+        let tail = text[range.upperBound...]
+        // The level token ends at whitespace or the closing tag.
+        let level = tail.prefix { ch in
+            !ch.isWhitespace && ch != "<"
+        }
+        let trimmed = level.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty { return trimmed.lowercased() }
+    }
+    return nil
+}
+
+/// Flatten the various shapes Claude Code uses for user-message content
+/// into a single searchable string. The `/thinking` marker can land in a
+/// plain-string body or inside an array of `tool_result`-style blocks.
+private func effortMarkerText(_ message: [String: Any]) -> String {
+    if let s = message["content"] as? String { return s }
+    guard let arr = message["content"] as? [[String: Any]] else { return "" }
+    var combined = ""
+    for block in arr {
+        if let s = block["text"] as? String { combined += s + "\n" }
+        if let s = block["content"] as? String { combined += s + "\n" }
+    }
+    return combined
+}
 
 private func newestJSONL(under root: URL) -> URL? {
     guard let it = FileManager.default.enumerator(

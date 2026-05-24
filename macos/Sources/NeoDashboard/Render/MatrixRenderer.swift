@@ -15,7 +15,7 @@ import CoreGraphics
 import CoreText
 import Foundation
 
-final class MatrixRenderer {
+final class MatrixRenderer: @unchecked Sendable {
     private let size: CGSize
     private let colorSpace = CGColorSpaceCreateDeviceRGB()
     private var staticBackground: CGImage?
@@ -104,7 +104,6 @@ final class MatrixRenderer {
     // MARK: - Background
 
     private func drawBackground(into ctx: CGContext, now: Date) {
-        let rect = CGRect(origin: .zero, size: size)
         // Vertical phosphor gradient.
         let grad = CGGradient(colorsSpace: colorSpace,
             colors: [MatrixTheme.bgTop.cgColor, MatrixTheme.bgBot.cgColor] as CFArray,
@@ -292,7 +291,7 @@ final class MatrixRenderer {
     // MARK: - Agent panel
 
     private func drawAgentPanel(into ctx: CGContext, rect: CGRect, tel: Telemetry, blink: Double, now: Date) {
-        var cx = rect.minX + 16
+        let cx = rect.minX + 16
         var cy = rect.minY + 14
 
         // Title.
@@ -673,6 +672,11 @@ final class MatrixRenderer {
                                             x: planPill.minX + 8))
         cy += 24
 
+        if isAPIBillingPlan(q.plan) {
+            drawAPIBillingSummary(into: ctx, rect: rect, topY: cy, quota: q)
+            return
+        }
+
         let showCost = !MatrixTheme.isSubscriptionPlan(q.plan)
         for w in q.windows {
             let pct = max(0, min(100, w.used / max(w.cap, 1) * 100))
@@ -704,6 +708,48 @@ final class MatrixRenderer {
             }
             cy += 16
         }
+    }
+
+    private func drawAPIBillingSummary(into ctx: CGContext,
+                                       rect: CGRect,
+                                       topY: CGFloat,
+                                       quota: Quota) {
+        let usage = quota.windows.max(by: { $0.resetInSec < $1.resetInSec })
+        let tokenText = fmtTok(usage?.used ?? 0)
+        let costText = String(format: "$%.2f", usage?.costUSD ?? 0)
+        let labelFont = MatrixTheme.font(10, weight: .bold)
+        let valueFont = MatrixTheme.font(20, weight: .heavy)
+        let rowInset: CGFloat = 16
+        let rowH: CGFloat = 42
+        var y = topY
+
+        for (label, value, color) in [
+            ("TOKENS USED", tokenText, MatrixTheme.ink),
+            ("EST. COST", costText, MatrixTheme.phosphor),
+        ] as [(String, String, NSColor)] {
+            let row = CGRect(x: rect.minX + rowInset,
+                             y: y,
+                             width: rect.width - rowInset * 2,
+                             height: rowH)
+            ctx.setFillColor(MatrixTheme.phosphor.withAlphaComponent(0.055).cgColor)
+            ctx.fill(row)
+            ctx.setStrokeColor(MatrixTheme.panelBorder.cgColor)
+            ctx.stroke(row.insetBy(dx: 0.5, dy: 0.5))
+
+            _ = drawText(ctx, label, font: labelFont,
+                         color: MatrixTheme.inkFaint,
+                         position: CGPoint(x: row.minX + 10, y: row.minY + 8))
+            let valueW = stringWidth(value, font: valueFont)
+            _ = drawText(ctx, value, font: valueFont,
+                         color: color,
+                         position: CGPoint(x: row.maxX - 10 - valueW,
+                                           y: row.minY + 13))
+            y += rowH + 8
+        }
+    }
+
+    private func isAPIBillingPlan(_ plan: String) -> Bool {
+        plan.uppercased().contains("API")
     }
 
     // MARK: - Sub-agents panel
@@ -763,7 +809,6 @@ final class MatrixRenderer {
 
     private func drawFooter(into ctx: CGContext, rect: CGRect, tel: Telemetry, now: Date) {
         let m = tel.model
-        let q = tel.quota
         var lx = rect.minX + 16
         // Center the clock digits optically inside the footer rect, then
         // share that baseline with the small left/right stats so every
@@ -778,9 +823,16 @@ final class MatrixRenderer {
         let baseY = rect.midY + (tight.origin.y + tight.height / 2)
         let smallTopY = baseY - smallFont.ascender
         let clockTopY = baseY - clockFont.ascender
+        // Show "—" instead of "0ms" / "0%" before any samples have
+        // arrived (fresh session / context-window reset). Zero is the
+        // sentinel the telemetry sources emit when no request has
+        // completed yet — not a real measurement.
+        let lastText = m.lastRequestMs > 0 ? "\(Int(m.lastRequestMs))" : "—"
+        let lastUnit = m.lastRequestMs > 0 ? "ms last" : " last"
+        let p95Text = m.p95ms > 0 ? "\(Int(m.p95ms))ms" : "—"
         let parts: [(String, String)] = [
-            ("\(Int(m.lastRequestMs))", "ms last"),
-            ("P95 ", "\(Int(m.p95ms))ms"),
+            (lastText, lastUnit),
+            ("P95 ", p95Text),
             ("CACHE ",
              String(format: "%d%%", Int(m.cacheReadTokens
                  / max(m.cacheReadTokens + m.inputTokens + m.cacheWriteTokens, 1) * 100))),
@@ -828,19 +880,9 @@ final class MatrixRenderer {
         // Right stats. Weather replaces the legacy UTC-offset chip; until
         // the first network refresh succeeds we show a placeholder.
         let weatherText = (WeatherService.shared.summary ?? "—").uppercased()
-        var rx = rect.maxX - 16
-        if !MatrixTheme.isSubscriptionPlan(q.plan) {
-            let cost = q.windows.first?.costUSD ?? 0
-            let txt = String(format: "5H  $%.2f", cost)
-            let cw2 = stringWidth(txt, font: smallBoldFont)
-            _ = drawText(ctx, txt, font: smallBoldFont,
-                         color: MatrixTheme.phosphor,
-                         position: CGPoint(x: rx - cw2, y: smallTopY))
-            rx -= cw2 + 16
-        }
         let weatherW = stringWidth(weatherText, font: smallFont)
         _ = drawText(ctx, weatherText, font: smallFont, color: MatrixTheme.inkDim,
-                     position: CGPoint(x: rx - weatherW, y: smallTopY))
+                     position: CGPoint(x: rect.maxX - weatherW, y: smallTopY))
     }
 
     // MARK: - Generic helpers
@@ -883,13 +925,46 @@ final class MatrixRenderer {
         if words.isEmpty { return }
         var lines: [String] = []
         var cur = ""
-        for word in words {
+
+        // Helper: push current line and reset; respects maxLines.
+        func flush() {
+            if !cur.isEmpty {
+                lines.append(cur)
+                cur = ""
+            }
+        }
+
+        wrapLoop: for word in words {
+            if lines.count >= maxLines { break }
+
+            // Single word longer than the panel — character-break it so
+            // long paths / URLs don't blow past the container edge.
+            if stringWidth(word, font: font) > maxW {
+                flush()
+                var chunk = ""
+                for ch in word {
+                    if lines.count >= maxLines { break wrapLoop }
+                    let cand = chunk + String(ch)
+                    if stringWidth(cand, font: font) <= maxW {
+                        chunk = cand
+                    } else if chunk.isEmpty {
+                        // Single character wider than maxW — give up.
+                        break wrapLoop
+                    } else {
+                        lines.append(chunk)
+                        chunk = String(ch)
+                    }
+                }
+                if !chunk.isEmpty, lines.count < maxLines { cur = chunk }
+                continue
+            }
+
             let candidate = cur.isEmpty ? word : cur + " " + word
             if stringWidth(candidate, font: font) <= maxW {
                 cur = candidate
             } else {
-                if !cur.isEmpty { lines.append(cur) }
-                if lines.count >= maxLines - 1 { cur = word; break }
+                flush()
+                if lines.count >= maxLines { break }
                 cur = word
             }
         }
@@ -898,7 +973,13 @@ final class MatrixRenderer {
             lines[lines.count - 1] = elide(last, font: font, maxW: maxW)
         }
         for (i, line) in lines.enumerated() {
-            _ = drawText(ctx, line, font: font, color: color,
+            // Safety net: even if our wrap logic let something through
+            // (e.g. unusual fonts where stringWidth disagrees), elide so
+            // the glyphs never cross the container's right edge.
+            let fitted = stringWidth(line, font: font) <= maxW
+                ? line
+                : elide(line, font: font, maxW: maxW)
+            _ = drawText(ctx, fitted, font: font, color: color,
                          position: CGPoint(x: x, y: y + CGFloat(i) * lineH))
         }
     }

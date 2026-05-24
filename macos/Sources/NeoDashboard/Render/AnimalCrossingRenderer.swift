@@ -23,7 +23,7 @@ import CoreGraphics
 import CoreText
 import Foundation
 
-final class AnimalCrossingRenderer: FrameRenderer {
+final class AnimalCrossingRenderer: FrameRenderer, @unchecked Sendable {
     private let size: CGSize
     private let colorSpace = CGColorSpaceCreateDeviceRGB()
 

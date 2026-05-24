@@ -27,10 +27,11 @@ final class FrameLoop {
     private var frameTimer: Timer?
     private let workQueue = DispatchQueue(label: "tech.bluevisor.NeoDashboard.render",
                                           qos: .userInteractive)
-    private var lcdOpen = false
-    /// Set while a render+send is in flight on workQueue. New ticks bail when
-    /// this is true so the clock can't lag behind a backed-up HID pipeline.
-    private let renderInFlight = OSAllocatedUnfairLock(initialState: false)
+    /// Cross-thread state for the worker queue. `inFlight` coalesces frame
+    /// ticks so the wall clock can't lag behind a backed-up HID pipeline;
+    /// `lcdOpen` flips once after the first successful HID handshake.
+    private struct WorkerState { var inFlight = false; var lcdOpen = false }
+    private let workerState = OSAllocatedUnfairLock(initialState: WorkerState())
 
     /// Transition state between dashboard ↔ clock fallback. A swap fades
     /// the *current* renderer out to black, switches, then fades the new
@@ -93,9 +94,9 @@ final class FrameLoop {
         guard let env else { return }
         // Coalesce: if HID is still pushing the previous frame, skip this
         // tick entirely. The next tick will pick up fresh telemetry + now.
-        let shouldRun = renderInFlight.withLock { busy -> Bool in
-            if busy { return false }
-            busy = true
+        let shouldRun = workerState.withLock { s -> Bool in
+            if s.inFlight { return false }
+            s.inFlight = true
             return true
         }
         guard shouldRun else { return }
@@ -114,20 +115,23 @@ final class FrameLoop {
         // alpha are decided here so the worker doesn't touch shared state.
         let wantsClock = !tel.hasContent || env.forceClock
         let (clockMode, blackAlpha) = stepFade(wantsClock: wantsClock, now: now)
+        // Capture everything the worker needs into Sendable locals before
+        // dispatching, so the closure doesn't reach into main-actor state.
         let activeRenderer = self.renderer
-        // Capture from the main actor; the worker closure must not read
-        // @Published state off-thread.
+        let clockRenderer = self.clockRenderer
+        let encoder = self.encoder
+        let driver = env.driver
+        let workerState = self.workerState
         let previewVisible = env.previewWindowVisible
 
-        workQueue.async { [weak self] in
-            guard let self else { return }
-            defer { self.renderInFlight.withLock { $0 = false } }
+        workQueue.async { [weak env] in
+            defer { workerState.withLock { $0.inFlight = false } }
             let base: CGImage?
             if clockMode {
                 // Prefer the active renderer's themed clock; fall back to
                 // the generic phosphor one if it doesn't override.
                 base = activeRenderer.renderClock(blink: phase, now: now)
-                    ?? self.clockRenderer.render(tel, blink: phase, now: now)
+                    ?? clockRenderer.render(tel, blink: phase, now: now)
             } else {
                 base = activeRenderer.render(tel, blink: phase, now: now)
             }
@@ -139,15 +143,15 @@ final class FrameLoop {
             // we only need to JPEG-encode once.
             let lcdImg = Self.oriented(raw, rotation: rotation,
                                        flipH: flipH, flipV: flipV) ?? raw
-            if pushToLCD, let jpeg = self.encoder.encode(lcdImg) {
-                _ = env.driver.send(jpeg)
+            if pushToLCD, let jpeg = encoder.encode(lcdImg) {
+                _ = driver.send(jpeg)
             }
             // Preview CGImage update is throttled by whether the window
             // is on-screen — when it's closed, nothing reads
             // `lastFramePreview` so we skip the main-actor hop entirely.
             if previewVisible {
                 Task { @MainActor in
-                    env.updatePreview(image: raw)
+                    env?.updatePreview(image: raw)
                 }
             }
         }
@@ -184,7 +188,7 @@ final class FrameLoop {
     /// Composite a black rectangle of the given alpha over the source —
     /// used by the fade transitions. Returns nil only on allocation
     /// failure; callers fall back to the source image.
-    private static func applyBlackOverlay(_ src: CGImage, alpha: Double) -> CGImage? {
+    nonisolated private static func applyBlackOverlay(_ src: CGImage, alpha: Double) -> CGImage? {
         guard alpha > 0 else { return src }
         let w = src.width, h = src.height
         guard let ctx = CGContext(
@@ -204,7 +208,7 @@ final class FrameLoop {
 
     /// Apply rotation + flip to the rendered canvas. Returns nil only on a
     /// CGContext allocation failure; the caller falls back to the source.
-    private static func oriented(_ src: CGImage,
+    nonisolated private static func oriented(_ src: CGImage,
                                  rotation: AppEnvironment.DisplayRotation,
                                  flipH: Bool, flipV: Bool) -> CGImage? {
         if rotation == .deg0, !flipH, !flipV { return src }
@@ -243,22 +247,25 @@ final class FrameLoop {
 
     private func openLCDIfNeeded() {
         guard let env else { return }
-        guard env.pushToLCD, !lcdOpen else { return }
+        let alreadyOpen = workerState.withLock { $0.lcdOpen }
+        guard env.pushToLCD, !alreadyOpen else { return }
         env.updateLCDStatus(.connecting)
-        workQueue.async { [weak self] in
-            guard let self else { return }
+        let driver = env.driver
+        let workerState = self.workerState
+        let logger = self.logger
+        workQueue.async { [weak env] in
             do {
-                try env.driver.open()
-                let (w, h) = env.driver.resolution
+                try driver.open()
+                let (w, h) = driver.resolution
+                workerState.withLock { $0.lcdOpen = true }
                 Task { @MainActor in
-                    env.updateLCDStatus(.ready(width: w, height: h))
+                    env?.updateLCDStatus(.ready(width: w, height: h))
                 }
-                self.lcdOpen = true
             } catch {
-                Task { @MainActor in
-                    env.updateLCDStatus(.error(error.localizedDescription))
+                Task { @MainActor [error] in
+                    env?.updateLCDStatus(.error(error.localizedDescription))
                 }
-                self.logger.error("LCD open failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("LCD open failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

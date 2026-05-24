@@ -8,7 +8,7 @@ import CoreGraphics
 import CoreText
 import Foundation
 
-final class ImageRenderer: FrameRenderer {
+final class ImageRenderer: FrameRenderer, @unchecked Sendable {
     private let size: CGSize
     private let colorSpace = CGColorSpaceCreateDeviceRGB()
     private let resourceName: String

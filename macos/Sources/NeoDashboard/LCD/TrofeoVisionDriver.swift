@@ -2,8 +2,10 @@
 //
 // The macOS kernel's IOHIDFamily claims HID interfaces, so we can't use
 // libusb. Instead we go through IOHIDManager: enumerate by VID/PID, open,
-// run the TRCC handshake via SetReport (output) + GetReport (input), then
-// push JPEG frames as a stream of 512-byte output reports (report ID 0).
+// run the TRCC handshake via SetReport (output) + an input-report
+// callback that receives the response off the interrupt IN endpoint,
+// then push JPEG frames as a stream of 512-byte output reports
+// (report ID 0).
 //
 // Wire timing copied from the C# decompilation (DELAY_PRE_INIT_S = 50 ms,
 // DELAY_POST_INIT_S = 200 ms, DELAY_FRAME_TYPE2_S = 1 ms).
@@ -11,6 +13,7 @@
 import Foundation
 import IOKit
 import IOKit.hid
+import os
 import os.log
 
 final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
@@ -29,6 +32,20 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
     private var manager: IOHIDManager?
     private var device: IOHIDDevice?
 
+    /// Input-report plumbing. The interrupt IN endpoint delivers reports
+    /// asynchronously via the runloop the manager is scheduled on
+    /// (the main runloop, set in `open()`). The handshake thread waits
+    /// on `handshakeSem`; the C callback stashes the bytes into
+    /// `handshakeState.received` then signals.
+    private struct HandshakeState {
+        var received: Data?
+    }
+    private let handshakeLock = OSAllocatedUnfairLock(initialState: HandshakeState())
+    private let handshakeSem = DispatchSemaphore(value: 0)
+    private var inputBuffer: UnsafeMutablePointer<UInt8>?
+    private var inputBufferSize: Int = 0
+    private var inputCallbackRegistered = false
+
     func open() throws {
         let mgr = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         let matching: [String: Any] = [
@@ -36,7 +53,11 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
             kIOHIDProductIDKey as String: Self.productID,
         ]
         IOHIDManagerSetDeviceMatching(mgr, matching as CFDictionary)
-        IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
+        // Schedule with the main runloop so input-report callbacks land
+        // on a thread we know is always pumping. The handshake itself
+        // runs on a background dispatch queue and just blocks on a
+        // semaphore until the callback fires.
+        IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
         let openResult = IOHIDManagerOpen(mgr, IOOptionBits(kIOHIDOptionsTypeNone))
         guard openResult == kIOReturnSuccess else {
             throw NSError(domain: "TrofeoVision", code: Int(openResult),
@@ -64,15 +85,26 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
             logger.info("LCD product: \(product, privacy: .public)")
         }
 
+        registerInputCallback(dev: dev)
         try handshake()
     }
 
     func close() {
         if let dev = device {
+            if inputCallbackRegistered, let buf = inputBuffer {
+                IOHIDDeviceRegisterInputReportCallback(dev, buf, inputBufferSize, nil, nil)
+                inputCallbackRegistered = false
+            }
             IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone))
         }
         if let mgr = manager {
             IOHIDManagerClose(mgr, 0)
+        }
+        if let buf = inputBuffer {
+            buf.deinitialize(count: inputBufferSize)
+            buf.deallocate()
+            inputBuffer = nil
+            inputBufferSize = 0
         }
         device = nil
         manager = nil
@@ -82,15 +114,35 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
 
     private func handshake() throws {
         guard let dev = device else { throw error("device not opened") }
+        _ = dev
         let initPacket = TRCCFraming.buildInitPacket()
         let maxAttempts = 3
         var lastError: Error?
         for attempt in 1...maxAttempts {
             do {
+                // Drain any stray signal from a previous attempt and
+                // clear the cached response before sending.
+                drainSemaphore()
+                handshakeLock.withLock { $0.received = nil }
+
                 try Thread.sleep(forSeconds: 0.050)
-                try setOutputReport(dev, initPacket, reportID: 0)
-                try Thread.sleep(forSeconds: 0.200)
-                let resp = try getInputReport(dev, reportID: 0, length: TRCCFraming.responseSize)
+                try setOutputReport(initPacket, reportID: 0)
+                // Response arrives via the interrupt IN endpoint
+                // (handled by the registered input-report callback).
+                // GetReport over the control endpoint returns
+                // kIOReturnUnsupported on this firmware, so we sit on
+                // the semaphore until the callback signals.
+                let waited = handshakeSem.wait(timeout: .now() + 1.0)
+                if waited == .timedOut {
+                    logger.warning("handshake \(attempt)/\(maxAttempts): no input report within 1s")
+                    lastError = error("timeout waiting for input report")
+                    try? Thread.sleep(forSeconds: 0.5)
+                    continue
+                }
+                guard let resp = handshakeLock.withLock({ $0.received }) else {
+                    lastError = error("input callback fired without data")
+                    continue
+                }
                 guard TRCCFraming.validateResponse(resp) else {
                     let hex = resp.prefix(16).map { String(format: "%02x", $0) }.joined()
                     logger.warning("handshake \(attempt)/\(maxAttempts): invalid response (first 16: \(hex, privacy: .public))")
@@ -111,11 +163,15 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
         throw lastError ?? error("handshake failed after \(maxAttempts) attempts")
     }
 
+    private func drainSemaphore() {
+        while handshakeSem.wait(timeout: .now()) == .success {}
+    }
+
     // MARK: - Frame send
 
     @discardableResult
     func send(_ jpeg: Data) -> Bool {
-        guard let dev = device else { return false }
+        guard device != nil else { return false }
         let (w, h) = resolution
         let packet = TRCCFraming.buildFramePacket(jpeg: jpeg, width: w, height: h)
         // The packet length is always a multiple of 512; chunk into output reports.
@@ -124,7 +180,7 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
             let end = min(offset + Self.chunkSize, packet.count)
             let chunk = packet.subdata(in: offset..<end)
             do {
-                try setOutputReport(dev, chunk, reportID: 0)
+                try setOutputReport(chunk, reportID: 0)
             } catch {
                 logger.error("send failed at offset \(offset)/\(packet.count): \(error.localizedDescription, privacy: .public)")
                 return false
@@ -138,7 +194,8 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
 
     // MARK: - HID transport
 
-    private func setOutputReport(_ dev: IOHIDDevice, _ data: Data, reportID: CFIndex) throws {
+    private func setOutputReport(_ data: Data, reportID: CFIndex) throws {
+        guard let dev = device else { throw error("device not opened") }
         let r = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> IOReturn in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return kIOReturnBadArgument
@@ -151,17 +208,38 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
         }
     }
 
-    private func getInputReport(_ dev: IOHIDDevice, reportID: CFIndex, length: Int) throws -> Data {
-        var buf = [UInt8](repeating: 0, count: length)
-        var actual = CFIndex(length)
-        let r = buf.withUnsafeMutableBufferPointer { ptr -> IOReturn in
-            IOHIDDeviceGetReport(dev, kIOHIDReportTypeInput, reportID,
-                                 ptr.baseAddress!, &actual)
+    /// Register the async input-report callback. The buffer must
+    /// outlive the registration — we keep it on the driver instance
+    /// for the lifetime of the open() call (cleared in close()).
+    private func registerInputCallback(dev: IOHIDDevice) {
+        let size = TRCCFraming.responseSize
+        // Read the device's max report length if available — some
+        // firmwares quietly truncate to a smaller report.
+        let reportSize: Int = {
+            if let v = IOHIDDeviceGetProperty(dev, kIOHIDMaxInputReportSizeKey as CFString) as? Int,
+               v > 0 {
+                return max(v, size)
+            }
+            return size
+        }()
+        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: reportSize)
+        buf.initialize(repeating: 0, count: reportSize)
+        inputBuffer = buf
+        inputBufferSize = reportSize
+        let ctx = UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+        IOHIDDeviceRegisterInputReportCallback(dev, buf, reportSize,
+                                               Self.inputReportCallback, ctx)
+        inputCallbackRegistered = true
+    }
+
+    private static let inputReportCallback: IOHIDReportCallback = { context, _, _, _, _, report, length in
+        guard let context else { return }
+        let me = Unmanaged<TrofeoVisionDriver>.fromOpaque(context).takeUnretainedValue()
+        let data = Data(bytes: report, count: length)
+        me.handshakeLock.withLock { state in
+            state.received = data
         }
-        if r != kIOReturnSuccess {
-            throw error("IOHIDDeviceGetReport returned \(String(format: "0x%08x", r))")
-        }
-        return Data(buf.prefix(Int(actual)))
+        me.handshakeSem.signal()
     }
 
     private func error(_ msg: String) -> NSError {

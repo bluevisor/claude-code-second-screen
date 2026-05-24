@@ -54,6 +54,8 @@ targets:
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         LSUIElement: YES
         NSHumanReadableCopyright: "© 2026 Bluevisor"
+        NSLocationUsageDescription: NeoDashboard uses your location to show local weather on the LCD.
+        NSLocationWhenInUseUsageDescription: NeoDashboard uses your location to show local weather on the LCD.
         NSSupportsAutomaticTermination: NO
         NSSupportsSuddenTermination: NO
     entitlements:

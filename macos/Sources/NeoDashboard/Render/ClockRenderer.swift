@@ -8,7 +8,7 @@ import CoreGraphics
 import CoreText
 import Foundation
 
-final class ClockRenderer: FrameRenderer {
+final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     private let size: CGSize
     private let colorSpace = CGColorSpaceCreateDeviceRGB()
     private let rain: RainPainter

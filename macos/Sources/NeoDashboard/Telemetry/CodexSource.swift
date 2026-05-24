@@ -379,7 +379,7 @@ final class CodexSource: TelemetrySource {
             p50ms: p50,
             p95ms: p95,
             lastRequestMs: lastMs,
-            latencyHistory: [],
+            latencyHistory: latencies,
             thinking: thinking.map { .effort($0) } ?? .on
         )
         let quota = Quota(
@@ -617,9 +617,38 @@ private func fileCounts(_ events: [CodexEvent]) -> (Int, Int) {
 }
 
 private func deriveStatus(_ events: [CodexEvent]) -> (AgentStatus, String?, String) {
+    let taskStartedIndex = events.lastIndex {
+        $0.type == "event_msg" && ($0.payload["type"] as? String) == "task_started"
+    }
+    let taskCompleteIndex = events.lastIndex {
+        $0.type == "event_msg" && ($0.payload["type"] as? String) == "task_complete"
+    }
+
+    let activeEvents: ArraySlice<CodexEvent>
+    if let completeIndex = taskCompleteIndex,
+       taskStartedIndex == nil || completeIndex > taskStartedIndex! {
+        let afterComplete = events.index(after: completeIndex)
+        let hasActiveEventAfterComplete = events[afterComplete...].contains { ev in
+            if ev.type == "response_item" { return true }
+            guard ev.type == "event_msg" else { return false }
+            let payloadType = ev.payload["type"] as? String
+            return payloadType == "task_started"
+                || payloadType == "user_message"
+                || payloadType == "agent_message"
+        }
+        if !hasActiveEventAfterComplete {
+            return (.idle, nil, "task complete")
+        }
+        activeEvents = events[afterComplete...]
+    } else if let startedIndex = taskStartedIndex {
+        activeEvents = events[startedIndex...]
+    } else {
+        activeEvents = events[events.startIndex...]
+    }
+
     var calls: [(String, [String: Any])] = []
     var completed = Set<String>()
-    for ev in events where ev.type == "response_item" {
+    for ev in activeEvents where ev.type == "response_item" {
         let payloadType = ev.payload["type"] as? String
         if payloadType == "function_call" {
             let cid = (ev.payload["call_id"] as? String) ?? ""
@@ -635,9 +664,15 @@ private func deriveStatus(_ events: [CodexEvent]) -> (AgentStatus, String?, Stri
         return (.tool, name, toolTarget(name, args).isEmpty ? "running" : toolTarget(name, args))
     }
 
-    for ev in events.reversed() {
+    for ev in activeEvents.reversed() {
         if ev.type == "event_msg" {
             let payloadType = ev.payload["type"] as? String
+            if payloadType == "task_complete" {
+                return (.idle, nil, "task complete")
+            }
+            if payloadType == "task_started" {
+                return (.processing, nil, "processing prompt")
+            }
             if payloadType == "user_message" {
                 return (.processing, nil, "processing prompt")
             }
@@ -645,7 +680,7 @@ private func deriveStatus(_ events: [CodexEvent]) -> (AgentStatus, String?, Stri
                 let isRecent = ev.timestamp > 0 && Date.now.timeIntervalSince1970 - ev.timestamp < 5
                 return (isRecent ? .writing : .idle, nil, "updating user")
             }
-            if payloadType == "token_count" || payloadType == "task_started" {
+            if payloadType == "token_count" {
                 continue
             }
         }

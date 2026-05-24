@@ -5,7 +5,12 @@
 import CoreGraphics
 import Foundation
 
-protocol FrameRenderer: AnyObject {
+/// `Sendable` so FrameLoop can capture concrete renderers into its
+/// `workQueue.async` closure under Swift 6 strict concurrency. All
+/// concrete renderers below conform via `@unchecked Sendable` — they
+/// own mutable state (caches, rain columns) but the discipline is
+/// single-writer: only the work queue calls `render` / `renderClock`.
+protocol FrameRenderer: AnyObject, Sendable {
     /// Render one canvas-sized frame. `blink` is a monotonically-increasing
     /// phase the implementation can use for caret/scan animations.
     func render(_ telemetry: Telemetry, blink: Double, now: Date) -> CGImage?

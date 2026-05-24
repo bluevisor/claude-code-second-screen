@@ -6,7 +6,7 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-final class JPEGEncoder {
+final class JPEGEncoder: @unchecked Sendable {
     var quality: CGFloat
 
     init(quality: CGFloat = 0.85) {

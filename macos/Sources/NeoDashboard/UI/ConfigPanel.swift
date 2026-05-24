@@ -3,6 +3,7 @@
 // time format, temperature unit, and theme-specific tuning like the
 // matrix-rain toggle.
 
+import AppKit
 import SwiftUI
 
 struct ConfigPanel: View {
@@ -23,6 +24,21 @@ struct ConfigPanel: View {
                 Picker("Date", selection: $env.dateFormat) {
                     ForEach(AppEnvironment.DateFormat.allCases) { Text($0.rawValue).tag($0) }
                 }
+            }
+            Section("Location") {
+                // If an IP fallback is cached, a normal refresh will not
+                // reach CoreLocation. This explicitly foregrounds us,
+                // drops the cache, and asks for a precise fix again.
+                Button {
+                    NSApp.activate(ignoringOtherApps: true)
+                    WeatherService.shared.requestPreciseLocationNow()
+                } label: {
+                    Label("Use precise location",
+                          systemImage: "location.circle")
+                }
+                .help("Re-trigger the macOS Location prompt and refresh weather. "
+                      + "If denied, you can re-enable from System Settings → "
+                      + "Privacy & Security → Location Services.")
             }
             if env.mode == .matrixDashboard {
                 Section("Matrix") {
