@@ -96,6 +96,35 @@ enum MatrixTheme {
         return c
     }()
 
+    /// Returns a cached attribute dictionary for `(font, color)`. The
+    /// renderer hits this on every text draw — the previous code
+    /// allocated a fresh `[NSAttributedString.Key: Any]` each call.
+    /// Keys use the address of the font and the components of the
+    /// color so identity comparisons stay cheap. The pool tops out at
+    /// a small handful of distinct combinations across the dashboard.
+    static func attributes(font: NSFont, color: NSColor) -> [NSAttributedString.Key: Any] {
+        let key = "\(ObjectIdentifier(font).hashValue)|\(color.cgColor.numberOfComponents)|\(color.cgColor.components ?? [0])" as NSString
+        if let cached = attrCache.object(forKey: key) {
+            // NSDictionary holds Any values; cast to Swift dict.
+            // The conversion is cheap because the underlying storage
+            // is shared (CFDictionary).
+            return cached as? [NSAttributedString.Key: Any]
+                ?? [.font: font, .foregroundColor: color]
+        }
+        let dict: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+        ]
+        attrCache.setObject(dict as NSDictionary, forKey: key)
+        return dict
+    }
+
+    private nonisolated(unsafe) static let attrCache: NSCache<NSString, NSDictionary> = {
+        let c = NSCache<NSString, NSDictionary>()
+        c.countLimit = 64
+        return c
+    }()
+
     /// Map PySide6 weight → JetBrains Mono variant. We register all variants
     /// from the bundled .ttf files at app startup; see `FontRegistration`.
     private static func fontName(for weight: NSFont.Weight) -> String {
