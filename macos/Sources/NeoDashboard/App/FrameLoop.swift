@@ -33,6 +33,10 @@ final class FrameLoop {
     /// `lcdOpen` flips once after the first successful HID handshake.
     private struct WorkerState { var inFlight = false; var lcdOpen = false }
     private let workerState = OSAllocatedUnfairLock(initialState: WorkerState())
+    /// Reusable CGContext for the orientation pass, keyed by output
+    /// dimensions. Lives on `workQueue` (serial) so access doesn't need
+    /// extra locking. Allocated lazily on first non-zero rotation.
+    private let orientationCtx = OrientationContextPool()
 
     /// Transition state between dashboard ↔ clock fallback. A swap fades
     /// the *current* renderer out to black, switches, then fades the new
@@ -140,6 +144,7 @@ final class FrameLoop {
         let driver = env.driver
         let workerState = self.workerState
         let previewVisible = env.previewWindowVisible
+        let orientationCtx = self.orientationCtx
 
         workQueue.async { [weak env] in
             defer { workerState.withLock { $0.inFlight = false } }
@@ -158,7 +163,8 @@ final class FrameLoop {
             // landscape so the user can read it on screen. When nothing
             // re-orients the frame (the common case), `lcdImg === raw` and
             // we only need to JPEG-encode once.
-            let lcdImg = Self.oriented(raw, rotation: rotation,
+            let lcdImg = Self.oriented(raw, pool: orientationCtx,
+                                       rotation: rotation,
                                        flipH: flipH, flipV: flipV) ?? raw
             if pushToLCD, let jpeg = encoder.encode(lcdImg) {
                 _ = driver.send(jpeg)
@@ -252,25 +258,26 @@ final class FrameLoop {
     /// (480×1280). At rotation 90/270 a portrait source rotates straight
     /// into the LCD's landscape frame; at 0/180 a landscape source passes
     /// through (after optional 180° flip).
+    ///
+    /// The output context is reused across frames via `orientationCtx` —
+    /// allocating a fresh 2.4 MB bitmap context per frame was the previous
+    /// behavior. Per-frame `saveGState/restoreGState` resets the CTM so
+    /// transforms don't accumulate, and the source draw fully overwrites
+    /// the previous frame's pixels (no clear needed).
     nonisolated private static func oriented(_ src: CGImage,
-                                 rotation: AppEnvironment.DisplayRotation,
-                                 flipH: Bool, flipV: Bool) -> CGImage? {
+                                              pool: OrientationContextPool,
+                                              rotation: AppEnvironment.DisplayRotation,
+                                              flipH: Bool, flipV: Bool) -> CGImage? {
         if rotation == .deg0, !flipH, !flipV { return src }
         let w = CGFloat(src.width)
         let h = CGFloat(src.height)
         let swap = (rotation == .deg90 || rotation == .deg270)
         let outW = swap ? h : w
         let outH = swap ? w : h
-        guard let ctx = CGContext(
-            data: nil,
-            width: Int(outW),
-            height: Int(outH),
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
+        guard let ctx = pool.context(width: Int(outW), height: Int(outH)) else {
+            return nil
+        }
+        ctx.saveGState()
         // CGContext is y-up. Compose: translate to output center, rotate
         // (positive = CCW in y-up, so clockwise display rotation negates it),
         // flip in the rotated frame, then translate back to source origin.
@@ -286,7 +293,40 @@ final class FrameLoop {
         ctx.translateBy(x: -w / 2, y: -h / 2)
         ctx.interpolationQuality = .high
         ctx.draw(src, in: CGRect(x: 0, y: 0, width: w, height: h))
-        return ctx.makeImage()
+        let img = ctx.makeImage()
+        ctx.restoreGState()
+        return img
+    }
+
+    /// Holds a single CGContext for the orientation pass, swapping it
+    /// only when the output dimensions change (i.e. when the user flips
+    /// between landscape and portrait rotations). The bitmap is reused
+    /// across frames — the per-frame `ctx.draw(src, in: …)` fully
+    /// overwrites the previous frame's pixels, so no explicit clear is
+    /// needed. Access is serialized by FrameLoop's `workQueue`; the
+    /// `@unchecked Sendable` is honest about that.
+    final class OrientationContextPool: @unchecked Sendable {
+        private var ctx: CGContext?
+        private var width: Int = 0
+        private var height: Int = 0
+
+        func context(width: Int, height: Int) -> CGContext? {
+            if let ctx, width == self.width, height == self.height {
+                return ctx
+            }
+            let new = CGContext(
+                data: nil,
+                width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                    | CGBitmapInfo.byteOrder32Little.rawValue
+            )
+            ctx = new
+            self.width = width
+            self.height = height
+            return new
+        }
     }
 
     private func openLCDIfNeeded() {
