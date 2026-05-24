@@ -20,8 +20,9 @@ final class FrameLoop {
     private let encoder = JPEGEncoder()
     private var renderer: FrameRenderer = MatrixRenderer()
     /// Used whenever telemetry reports no active session — overrides the
-    /// user-selected renderer.
-    private let clockRenderer = ClockRenderer()
+    /// user-selected renderer. Rebuilt alongside `renderer` when the
+    /// canvas orientation changes (see `reconfigure`).
+    private var clockRenderer: ClockRenderer = ClockRenderer()
     private var blink: Double = 0
     private var telTimer: Timer?
     private var frameTimer: Timer?
@@ -52,7 +53,7 @@ final class FrameLoop {
 
     func start() {
         guard let env else { return }
-        renderer = FrameRendererFactory.make(env.mode, showRain: env.showRain)
+        rebuildRenderers(env: env)
         openLCDIfNeeded()
         scheduleTimers(fps: env.targetFPS)
     }
@@ -61,8 +62,24 @@ final class FrameLoop {
         guard let env else { return }
         telTimer?.invalidate()
         frameTimer?.invalidate()
-        renderer = FrameRendererFactory.make(env.mode, showRain: env.showRain)
+        rebuildRenderers(env: env)
+        // Snap the fade machine to a clean state matching the current
+        // intent. Without this, an in-flight rotation-crossing fade
+        // could leave `currentIsClock` out of sync with what the user
+        // toggled, which looked like the clock toggle "not working".
+        fadeState = .idle
+        currentIsClock = env.wantsClock
         scheduleTimers(fps: env.targetFPS)
+    }
+
+    private func rebuildRenderers(env: AppEnvironment) {
+        let portrait = env.rotation.isPortrait
+        renderer = FrameRendererFactory.make(env.mode,
+                                             showRain: env.showRain,
+                                             portrait: portrait)
+        let clockSize = portrait ? MatrixTheme.canvasSizePortrait
+                                  : MatrixTheme.canvasSize
+        clockRenderer = ClockRenderer(size: clockSize)
     }
 
     private func scheduleTimers(fps: Int) {
@@ -113,7 +130,7 @@ final class FrameLoop {
         // Drive the fade state machine on the main actor before handing the
         // result off to the work queue. The active renderer + black overlay
         // alpha are decided here so the worker doesn't touch shared state.
-        let wantsClock = !tel.hasContent || env.forceClock
+        let wantsClock = env.resolveWantsClock(for: tel)
         let (clockMode, blackAlpha) = stepFade(wantsClock: wantsClock, now: now)
         // Capture everything the worker needs into Sendable locals before
         // dispatching, so the closure doesn't reach into main-actor state.
@@ -160,13 +177,25 @@ final class FrameLoop {
     /// Drives the dashboard↔clock fade machine. Returns whether the next
     /// frame should be drawn in clock mode (vs the regular dashboard) and
     /// the black-overlay alpha to apply (0 = full image, 1 = pure black).
+    ///
+    /// Transitions are cancellable: if the target flips mid-fade we either
+    /// snap back to idle (during fadingOut, since we haven't committed to
+    /// the new mode yet) or reverse into a fadingOut from the current
+    /// alpha (during fadingIn, where the new mode is already on screen).
+    /// Without this, double-clicking the clock toggle inside the 0.7s
+    /// fade window looked like the toggle was ignored.
     private func stepFade(wantsClock: Bool, now: Date) -> (Bool, Double) {
         switch fadeState {
         case .idle:
             if wantsClock != currentIsClock {
                 fadeState = .fadingOut(start: now)
             }
+            return (currentIsClock, 0)
         case .fadingOut(let start):
+            if wantsClock == currentIsClock {
+                fadeState = .idle
+                return (currentIsClock, 0)
+            }
             let progress = min(1, now.timeIntervalSince(start) / Self.fadeDuration)
             if progress >= 1 {
                 currentIsClock = wantsClock
@@ -176,13 +205,21 @@ final class FrameLoop {
             return (currentIsClock, progress)
         case .fadingIn(let start):
             let progress = min(1, now.timeIntervalSince(start) / Self.fadeDuration)
+            if wantsClock != currentIsClock {
+                // Reverse: continue from the current alpha back to fully
+                // black, then the next tick will start a fresh fadingOut
+                // toward the freshly-requested target.
+                let alpha = max(0, 1 - progress)
+                let backdated = now.addingTimeInterval(-(1 - alpha) * Self.fadeDuration)
+                fadeState = .fadingOut(start: backdated)
+                return (currentIsClock, alpha)
+            }
             if progress >= 1 {
                 fadeState = .idle
                 return (currentIsClock, 0)
             }
             return (currentIsClock, 1 - progress)
         }
-        return (currentIsClock, 0)
     }
 
     /// Composite a black rectangle of the given alpha over the source —
@@ -208,6 +245,13 @@ final class FrameLoop {
 
     /// Apply rotation + flip to the rendered canvas. Returns nil only on a
     /// CGContext allocation failure; the caller falls back to the source.
+    ///
+    /// The LCD hardware is fixed at 1280×480 — every frame we transmit
+    /// must match that grid, regardless of which rotation the user picked
+    /// or whether the source was rendered landscape (1280×480) or portrait
+    /// (480×1280). At rotation 90/270 a portrait source rotates straight
+    /// into the LCD's landscape frame; at 0/180 a landscape source passes
+    /// through (after optional 180° flip).
     nonisolated private static func oriented(_ src: CGImage,
                                  rotation: AppEnvironment.DisplayRotation,
                                  flipH: Bool, flipV: Bool) -> CGImage? {
@@ -249,7 +293,13 @@ final class FrameLoop {
         guard let env else { return }
         let alreadyOpen = workerState.withLock { $0.lcdOpen }
         guard env.pushToLCD, !alreadyOpen else { return }
-        env.updateLCDStatus(.connecting)
+        // Defer the @Published write to the next main-actor tick so we
+        // never publish during a SwiftUI view-update pass — `start()` /
+        // `reconfigure()` are both called from contexts that may be
+        // inside a view body (rotation binding setter, theme picker
+        // button) and a synchronous publish there trips
+        // "Publishing changes from within view updates is not allowed".
+        Task { @MainActor [weak env] in env?.updateLCDStatus(.connecting) }
         let driver = env.driver
         let workerState = self.workerState
         let logger = self.logger

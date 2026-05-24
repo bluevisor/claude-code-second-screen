@@ -12,6 +12,18 @@ private struct CodexTokenSample {
     let cacheCreate: Double
 }
 
+private struct CodexRateLimitWindow {
+    let usedPercent: Double
+    let windowMinutes: Double
+    let resetsAt: TimeInterval
+}
+
+private struct CodexRateLimitSnapshot {
+    let planLabel: String?
+    let primary: CodexRateLimitWindow?
+    let secondary: CodexRateLimitWindow?
+}
+
 enum CodexAgentKind: String {
     case codex
     case agy
@@ -129,10 +141,11 @@ final class CodexSource: TelemetrySource {
         var bestMtime: TimeInterval = -1
 
         for root in sessionsDirs {
+            let options: FileManager.DirectoryEnumerationOptions = kind == .agy ? [] : [.skipsHiddenFiles]
             guard let it = fm.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.contentModificationDateKey],
-                options: [.skipsHiddenFiles]
+                options: options
             ) else { continue }
             for case let url as URL in it where url.pathExtension == "jsonl" {
                 guard let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
@@ -153,6 +166,22 @@ final class CodexSource: TelemetrySource {
             offset = 0
             events.removeAll(keepingCapacity: true)
         }
+
+        if events.isEmpty && url.path.contains("transcript") {
+            let sessionID = SessionDiscovery.rolloutID(from: url)
+            let cwd = FileManager.default.currentDirectoryPath
+            let isoString = CodexSource.iso8601Fractional.string(from: Date.now)
+            let metaDict: [String: Any] = [
+                "type": "session_meta",
+                "payload": [
+                    "id": sessionID,
+                    "cwd": cwd,
+                    "timestamp": isoString
+                ]
+            ]
+            events.append(CodexEvent(raw: metaDict))
+        }
+
         if size == offset { return }
 
         guard let fh = try? FileHandle(forReadingFrom: url) else { return }
@@ -267,22 +296,31 @@ final class CodexSource: TelemetrySource {
             } else if ev.type == "turn_context" {
                 cwd = (ev.payload["cwd"] as? String) ?? cwd
                 modelID = (ev.payload["model"] as? String) ?? modelID
-            } else if ev.type == "event_msg",
-                      (ev.payload["type"] as? String) == "token_count" {
-                let info = ev.payload["info"] as? [String: Any] ?? [:]
-                let total = info["total_token_usage"] as? [String: Any] ?? [:]
-                totalIn = doubleValue(total["input_tokens"])
-                totalOut = doubleValue(total["output_tokens"])
-                    + doubleValue(total["reasoning_output_tokens"])
-                totalCacheRead = doubleValue(total["cached_input_tokens"])
-                totalCacheCreate = 0
-                observedContextMax = doubleValue(info["model_context_window"])
-                let last = info["last_token_usage"] as? [String: Any] ?? [:]
-                lastContextUsed = doubleValue(last["total_tokens"])
+            } else if ev.type == "event_msg" {
+                if (ev.payload["type"] as? String) == "token_count" {
+                    let info = ev.payload["info"] as? [String: Any] ?? [:]
+                    let total = info["total_token_usage"] as? [String: Any] ?? [:]
+                    totalIn = doubleValue(total["input_tokens"])
+                    totalOut = doubleValue(total["output_tokens"])
+                        + doubleValue(total["reasoning_output_tokens"])
+                    totalCacheRead = doubleValue(total["cached_input_tokens"])
+                    totalCacheCreate = 0
+                    observedContextMax = doubleValue(info["model_context_window"])
+                    let last = info["last_token_usage"] as? [String: Any] ?? [:]
+                    lastContextUsed = doubleValue(last["total_tokens"])
+                } else if (ev.payload["type"] as? String) == "user_message",
+                          let msg = ev.payload["message"] as? String {
+                    if let range = msg.range(of: "Model Selection` from "),
+                       let toRange = msg[range.upperBound...].range(of: " to "),
+                       let endRange = msg[toRange.upperBound...].range(of: ".") {
+                        let modelPart = String(msg[toRange.upperBound..<endRange.lowerBound])
+                        modelID = modelPart
+                    }
+                }
             }
         }
 
-        if modelID.isEmpty { modelID = kind == .codex ? "gpt-5" : "agy" }
+        if modelID.isEmpty { modelID = kind == .codex ? "gpt-5" : "gemini" }
         let modelSpec = parseCodexModelID(modelID, observedContextMax: observedContextMax)
         let contextUsed = lastContextUsed > 0 ? lastContextUsed : totalIn + totalCacheRead
 
@@ -369,7 +407,7 @@ final class CodexSource: TelemetrySource {
             id: modelID,
             name: modelSpec.name,
             version: modelSpec.version,
-            provider: kind.provider,
+            provider: modelSpec.provider,
             contextUsed: contextUsed,
             contextMax: modelSpec.contextMax,
             inputTokens: totalIn,
@@ -382,20 +420,21 @@ final class CodexSource: TelemetrySource {
             latencyHistory: latencies,
             thinking: thinking.map { .effort($0) } ?? .on
         )
+        let rateLimits = latestCodexRateLimits(events)
+        let planLabel = rateLimits?.planLabel ?? plan
         let quota = Quota(
-            plan: plan,
+            plan: planLabel,
             pricingInPerMTok: modelSpec.pricingIn,
             pricingOutPerMTok: modelSpec.pricingOut,
-            windows: [
-                QuotaWindow(label: "5H", used: used5h,
-                            cap: max(8_000_000, ceilNiceCodex(used5h * 1.3)),
-                            costUSD: cost5h,
-                            resetInSec: max(0, Int(5 * 3600 - elapsed))),
-                QuotaWindow(label: "7D", used: used7d,
-                            cap: max(100_000_000, ceilNiceCodex(used7d * 1.3)),
-                            costUSD: cost7d,
-                            resetInSec: 7 * 86400),
-            ]
+            windows: quotaWindows(
+                plan: planLabel,
+                rateLimits: rateLimits,
+                used5h: used5h,
+                used7d: used7d,
+                cost5h: cost5h,
+                cost7d: cost7d,
+                now: now
+            )
         )
         return Telemetry(agent: agent, model: model, quota: quota, source: "LIVE")
     }
@@ -427,7 +466,7 @@ final class CodexSource: TelemetrySource {
     private static func defaultSessionsDirs(for kind: CodexAgentKind) -> [URL] {
         let codex = URL(fileURLWithPath: NSString("~/.codex/sessions").expandingTildeInPath,
                         isDirectory: true)
-        let agy = URL(fileURLWithPath: NSString("~/.agy/sessions").expandingTildeInPath,
+        let agy = URL(fileURLWithPath: NSString("~/.gemini/antigravity-cli/brain").expandingTildeInPath,
                       isDirectory: true)
         switch kind {
         case .codex: return [codex]
@@ -538,14 +577,59 @@ private struct CodexEvent {
 
     init(raw: [String: Any]) {
         self.raw = raw
-        self.type = (raw["type"] as? String) ?? ""
-        if let s = raw["timestamp"] as? String,
+        
+        let isTranscript = raw["step_index"] != nil || raw["source"] != nil
+        if isTranscript {
+            let typeStr = (raw["type"] as? String) ?? ""
+            let stepIndex = (raw["step_index"] as? Int) ?? 0
+            let contentStr = (raw["content"] as? String) ?? ""
+            
+            if typeStr == "USER_INPUT" {
+                self.type = "event_msg"
+                self.payload = [
+                    "type": "user_message",
+                    "message": contentStr
+                ]
+            } else if typeStr == "PLANNER_RESPONSE" {
+                self.type = "response_item"
+                if let toolCalls = raw["tool_calls"] as? [[String: Any]], let firstCall = toolCalls.first {
+                    let name = firstCall["name"] as? String ?? "tool"
+                    let args = firstCall["args"] as? [String: Any] ?? [:]
+                    self.payload = [
+                        "type": "function_call",
+                        "call_id": "step_\(stepIndex)",
+                        "name": name,
+                        "arguments": args
+                    ]
+                } else {
+                    self.payload = [
+                        "type": "message",
+                        "role": "assistant",
+                        "content": contentStr
+                    ]
+                }
+            } else if (raw["source"] as? String) == "MODEL" && typeStr != "PLANNER_RESPONSE" {
+                self.type = "response_item"
+                self.payload = [
+                    "type": "function_call_output",
+                    "call_id": "step_\(stepIndex - 1)",
+                    "output": contentStr
+                ]
+            } else {
+                self.type = typeStr
+                self.payload = (raw["payload"] as? [String: Any]) ?? [:]
+            }
+        } else {
+            self.type = (raw["type"] as? String) ?? ""
+            self.payload = (raw["payload"] as? [String: Any]) ?? [:]
+        }
+        
+        if let s = (raw["timestamp"] as? String) ?? (raw["created_at"] as? String),
            let d = codexISOToDate(s) {
             self.timestamp = d.timeIntervalSince1970
         } else {
             self.timestamp = 0
         }
-        self.payload = (raw["payload"] as? [String: Any]) ?? [:]
     }
 }
 
@@ -556,6 +640,120 @@ private func codexReasoningEffort(_ events: [CodexEvent]) -> String? {
         }
     }
     return nil
+}
+
+private func latestCodexRateLimits(_ events: [CodexEvent]) -> CodexRateLimitSnapshot? {
+    for ev in events.reversed() {
+        guard let raw = ev.payload["rate_limits"] as? [String: Any] else { continue }
+        return CodexRateLimitSnapshot(
+            planLabel: codexPlanLabel(raw["plan_type"]) ?? codexPlanLabel(raw["limit_name"]),
+            primary: codexRateLimitWindow(raw["primary"]),
+            secondary: codexRateLimitWindow(raw["secondary"])
+        )
+    }
+    return nil
+}
+
+private func codexRateLimitWindow(_ raw: Any?) -> CodexRateLimitWindow? {
+    guard let dict = raw as? [String: Any] else { return nil }
+    let usedPercent = doubleValue(dict["used_percent"])
+    let windowMinutes = doubleValue(dict["window_minutes"])
+    let resetsAt = doubleValue(dict["resets_at"])
+    guard usedPercent > 0 || windowMinutes > 0 || resetsAt > 0 else { return nil }
+    return CodexRateLimitWindow(
+        usedPercent: usedPercent,
+        windowMinutes: windowMinutes,
+        resetsAt: resetsAt
+    )
+}
+
+private func codexPlanLabel(_ raw: Any?) -> String? {
+    guard let value = raw as? String else { return nil }
+    let plan = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !plan.isEmpty else { return nil }
+    let normalized = plan.lowercased()
+        .replacingOccurrences(of: "-", with: "_")
+        .replacingOccurrences(of: " ", with: "_")
+    switch normalized {
+    case "api", "api_key", "api_usage", "usage":
+        return "API USAGE"
+    case "chatgpt_plus":
+        return "PLUS"
+    default:
+        return normalized
+            .split(separator: "_")
+            .map { $0.uppercased() }
+            .joined(separator: " ")
+    }
+}
+
+private func quotaWindows(plan: String,
+                          rateLimits: CodexRateLimitSnapshot?,
+                          used5h: Double,
+                          used7d: Double,
+                          cost5h: Double,
+                          cost7d: Double,
+                          now: TimeInterval) -> [QuotaWindow] {
+    if isAPIBillingPlan(plan) {
+        return [
+            QuotaWindow(label: "5H", used: used5h,
+                        cap: max(8_000_000, ceilNiceCodex(used5h * 1.3)),
+                        costUSD: cost5h,
+                        resetInSec: 5 * 3600),
+            QuotaWindow(label: "7D", used: used7d,
+                        cap: max(100_000_000, ceilNiceCodex(used7d * 1.3)),
+                        costUSD: cost7d,
+                        resetInSec: 7 * 86400),
+        ]
+    }
+
+    return [
+        subscriptionQuotaWindow(label: "5H", used: used5h,
+                                fallbackCap: 8_000_000,
+                                rateLimit: rateLimits?.primary,
+                                defaultReset: 5 * 3600,
+                                now: now),
+        subscriptionQuotaWindow(label: "7D", used: used7d,
+                                fallbackCap: 100_000_000,
+                                rateLimit: rateLimits?.secondary,
+                                defaultReset: 7 * 86400,
+                                now: now),
+    ]
+}
+
+private func subscriptionQuotaWindow(label: String,
+                                     used: Double,
+                                     fallbackCap: Double,
+                                     rateLimit: CodexRateLimitWindow?,
+                                     defaultReset: Int,
+                                     now: TimeInterval) -> QuotaWindow {
+    let pct = rateLimit?.usedPercent ?? 0
+    let cap: Double
+    let displayUsed: Double
+    if pct > 0, used > 0 {
+        cap = max(used * 100 / pct, 1)
+        displayUsed = used
+    } else if pct > 0 {
+        cap = fallbackCap
+        displayUsed = fallbackCap * pct / 100
+    } else {
+        cap = max(fallbackCap, ceilNiceCodex(used * 1.3))
+        displayUsed = used
+    }
+
+    let reset: Int
+    if let resetsAt = rateLimit?.resetsAt, resetsAt > 0 {
+        reset = max(0, Int(resetsAt - now))
+    } else {
+        reset = defaultReset
+    }
+
+    return QuotaWindow(label: label, used: displayUsed, cap: cap,
+                       costUSD: 0, resetInSec: reset)
+}
+
+private func isAPIBillingPlan(_ plan: String) -> Bool {
+    plan.uppercased().contains("API")
 }
 
 private func reasoningEffort(in dict: [String: Any], depth: Int = 0) -> String? {
@@ -825,6 +1023,7 @@ private struct CodexModelSpec {
     let contextMax: Double
     let pricingIn: Double
     let pricingOut: Double
+    let provider: String
 }
 
 private struct CodexPricing {
@@ -839,6 +1038,7 @@ private let codexPricingTable = [
     CodexPricing(prefix: "gpt-5", contextMax: 400_000, pricingIn: 2.50, pricingOut: 10.00),
     CodexPricing(prefix: "gpt-4.1", contextMax: 1_000_000, pricingIn: 2.00, pricingOut: 8.00),
     CodexPricing(prefix: "o4-mini", contextMax: 200_000, pricingIn: 1.10, pricingOut: 4.40),
+    CodexPricing(prefix: "gemini", contextMax: 1_048_576, pricingIn: 0.075, pricingOut: 0.30),
 ]
 
 private func parseCodexModelID(_ id: String, observedContextMax: Double) -> CodexModelSpec {
@@ -849,16 +1049,34 @@ private func parseCodexModelID(_ id: String, observedContextMax: Double) -> Code
 
     let version = firstNumber(in: raw) ?? "?"
     let name: String
-    if lower.hasPrefix("o") {
+    let provider: String
+
+    if lower.contains("gemini") {
+        provider = "google"
+        if lower.contains("flash") {
+            name = "GEMINI FLASH"
+        } else if lower.contains("pro") {
+            name = "GEMINI PRO"
+        } else if lower.contains("ultra") {
+            name = "GEMINI ULTRA"
+        } else {
+            name = "GEMINI"
+        }
+    } else if lower.hasPrefix("o") {
+        provider = "openai"
         name = raw.uppercased()
     } else if lower.hasPrefix("gpt") {
+        provider = "openai"
         let parts = raw.split(separator: "-")
         name = parts.count >= 2 ? "\(parts[0])-\(parts[1])".uppercased() : raw.uppercased()
     } else {
+        provider = "openai"
         name = raw.uppercased()
     }
+
     return CodexModelSpec(name: name, version: version, contextMax: contextMax,
-                          pricingIn: pricing.pricingIn, pricingOut: pricing.pricingOut)
+                          pricingIn: pricing.pricingIn, pricingOut: pricing.pricingOut,
+                          provider: provider)
 }
 
 private func firstNumber(in s: String) -> String? {

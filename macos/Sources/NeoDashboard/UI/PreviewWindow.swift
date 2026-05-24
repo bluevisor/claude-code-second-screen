@@ -15,30 +15,48 @@ struct PreviewWindow: View {
     @State private var showingConfig = false
 
     var body: some View {
-        GeometryReader { proxy in
-            let size = sanitized(proxy.size)
-            ZStack {
-                Color.black
-                if let cg = env.lastFramePreview {
-                    Image(decorative: cg, scale: 1, orientation: .up)
-                        .resizable()
-                        .interpolation(.high)
-                        .aspectRatio(1280.0 / 480.0, contentMode: .fit)
-                        .frame(width: size.width, height: size.height)
-                } else {
-                    ProgressView("Waiting for first frame…")
-                        .controlSize(.small)
-                        .tint(.green)
-                }
+        // Preview shows the raw rendered canvas — portrait when the
+        // user is in a 90°/270° rotation, landscape otherwise.
+        let aspect: CGFloat = env.rotation.isPortrait ? 480.0 / 1280.0
+                                                      : 1280.0 / 480.0
+        ZStack {
+            Color.black
+            if let cg = env.lastFramePreview {
+                // Resizable + aspectRatio is enough — the image fills the
+                // available container while preserving aspect. Previously
+                // this was wrapped in GeometryReader and given an explicit
+                // .frame(width:height:) tied to the proxy size; that
+                // combination over-constrained the layout and triggered
+                // "layoutSubtreeIfNeeded on a view already being laid out"
+                // when the aspect ratio flipped between portrait and
+                // landscape.
+                Image(decorative: cg, scale: 1, orientation: .up)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(aspect, contentMode: .fit)
+            } else {
+                ProgressView("Waiting for first frame…")
+                    .controlSize(.small)
+                    .tint(.green)
             }
-            .frame(width: size.width, height: size.height)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .frame(minWidth: 640, minHeight: 240)
         .navigationTitle("NeoDashboard · Live Preview")
         // Tell FrameLoop whether to bother publishing the per-frame
         // CGImage. When this window is closed, nothing is reading it.
-        .onAppear { env.previewWindowVisible = true }
-        .onDisappear { env.previewWindowVisible = false }
+        // The flips are dispatched to a later runloop tick so they
+        // never land mid-view-update — onAppear / onDisappear can be
+        // delivered while SwiftUI is still walking the scene graph
+        // (e.g. when activation policy changes during a CoreLocation
+        // prompt), and a synchronous @Published write there trips
+        // "Publishing changes from within view updates is not allowed".
+        .onAppear {
+            Task { @MainActor in env.previewWindowVisible = true }
+        }
+        .onDisappear {
+            Task { @MainActor in env.previewWindowVisible = false }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 Menu {
@@ -66,14 +84,23 @@ struct PreviewWindow: View {
                 }
             }
             ToolbarItemGroup(placement: .primaryAction) {
+                // Explicitly read the two underlying @Published values
+                // here so SwiftUI's dependency tracker subscribes the
+                // toolbar to both — relying only on the computed
+                // `env.wantsClock` left the view stale after telemetry
+                // updates because tracking through a non-@Published
+                // computed property isn't always picked up.
+                let _ = env.clockMode
+                let _ = env.telemetry.hasContent
+                let showingClock = env.wantsClock
                 Button {
-                    env.forceClock.toggle()
+                    env.clockMode = showingClock ? .off : .on
                 } label: {
                     Label("Clock",
-                          systemImage: env.forceClock ? "clock.fill" : "clock")
-                        .foregroundStyle(env.forceClock ? Color.accentColor : .primary)
+                          systemImage: showingClock ? "clock.fill" : "clock")
+                        .foregroundStyle(showingClock ? Color.accentColor : .primary)
                 }
-                .help("Force the clock fallback regardless of active session")
+                .help("Toggle the clock face. Reflects the actual displayed mode — the auto-fallback when no session is active also shows the button as on.")
                 Picker("Rotation", selection: $env.rotation) {
                     ForEach(AppEnvironment.DisplayRotation.allCases) { r in
                         Text(r.label).tag(r)
@@ -94,11 +121,6 @@ struct PreviewWindow: View {
                 .help("Mirror the LCD frame vertically")
             }
         }
-    }
-
-    private func sanitized(_ size: CGSize) -> CGSize {
-        CGSize(width: max(1, size.width.isFinite ? size.width : 1),
-               height: max(1, size.height.isFinite ? size.height : 1))
     }
 
     private func themeSymbol(_ mode: AppEnvironment.RenderMode) -> String {

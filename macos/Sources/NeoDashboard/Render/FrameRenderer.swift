@@ -29,10 +29,17 @@ extension FrameRenderer {
 extension MatrixRenderer: FrameRenderer {}
 
 enum FrameRendererFactory {
-    static func make(_ mode: AppEnvironment.RenderMode, showRain: Bool) -> FrameRenderer {
+    static func make(_ mode: AppEnvironment.RenderMode,
+                     showRain: Bool,
+                     portrait: Bool) -> FrameRenderer {
         switch mode {
         case .matrixDashboard:
-            return MatrixRenderer(showRain: showRain)
+            // Matrix has a real portrait layout. Other themes haven't been
+            // ported yet — they keep the landscape canvas and get rotated
+            // by `oriented()` for now.
+            let size = portrait ? MatrixTheme.canvasSizePortrait
+                                 : MatrixTheme.canvasSize
+            return MatrixRenderer(size: size, showRain: showRain)
         case .cozy:
             return AnimalCrossingRenderer()
         case .wowAlliance:

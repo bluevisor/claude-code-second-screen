@@ -74,6 +74,11 @@ enum SessionDiscovery {
         out += scanCodexFormat(sessionsDir: agySessionsDir,
                                defaultKind: .agy,
                                now: now)
+        let geminiAgySessionsDir = URL(fileURLWithPath: NSString("~/.gemini/antigravity-cli/brain").expandingTildeInPath,
+                                       isDirectory: true)
+        out += scanCodexFormat(sessionsDir: geminiAgySessionsDir,
+                               defaultKind: .agy,
+                               now: now)
         var seen = Set<String>()
         out = out.filter { seen.insert($0.id).inserted }
         out.sort {
@@ -140,9 +145,10 @@ enum SessionDiscovery {
                                         defaultKind: ActiveSession.Kind,
                                         now: Date) -> [ActiveSession] {
         let fm = FileManager.default
+        let options: FileManager.DirectoryEnumerationOptions = defaultKind == .agy ? [] : [.skipsHiddenFiles]
         guard let it = fm.enumerator(at: sessionsDir,
                                      includingPropertiesForKeys: [.contentModificationDateKey],
-                                     options: [.skipsHiddenFiles]) else { return [] }
+                                     options: options) else { return [] }
         let cutoff = now.timeIntervalSince1970 - activeWindow
         var candidates: [(url: URL, mtime: TimeInterval)] = []
         candidates.reserveCapacity(16)
@@ -182,6 +188,11 @@ enum SessionDiscovery {
 
     private static func codexMetadata(url: URL,
                                       defaultKind: ActiveSession.Kind) -> CodexMetadata? {
+        if url.path.contains("transcript.jsonl") {
+            let sessionID = rolloutID(from: url)
+            let cwd = FileManager.default.currentDirectoryPath
+            return CodexMetadata(kind: .agy, sessionID: sessionID, cwd: cwd)
+        }
         guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? fh.close() }
         guard let data = try? fh.read(upToCount: 128 * 1024),
@@ -190,6 +201,7 @@ enum SessionDiscovery {
         var cwd = ""
         var originator = ""
         var source = ""
+        var hasGemini = false
         for raw in text.split(separator: "\n", omittingEmptySubsequences: true).prefix(60) {
             guard let d = raw.data(using: .utf8),
                   let any = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
@@ -202,6 +214,9 @@ enum SessionDiscovery {
                 source = (payload["source"] as? String) ?? source
             } else if type == "turn_context" {
                 cwd = (payload["cwd"] as? String) ?? cwd
+                if let model = payload["model"] as? String, model.lowercased().contains("gemini") {
+                    hasGemini = true
+                }
             }
             if !sessionID.isEmpty, !cwd.isEmpty { break }
         }
@@ -209,14 +224,23 @@ enum SessionDiscovery {
         guard !sessionID.isEmpty else { return nil }
         let path = url.path.lowercased()
         let discriminator = "\(originator) \(source) \(path)".lowercased()
-        let kind: ActiveSession.Kind = discriminator.contains("agy") ? .agy : defaultKind
+        var kind: ActiveSession.Kind = discriminator.contains("agy") ? .agy : defaultKind
+        if hasGemini {
+            kind = .agy
+        }
         return CodexMetadata(kind: kind,
                              sessionID: sessionID,
                              cwd: cwd.isEmpty ? "~" : cwd)
     }
 
-    private static func rolloutID(from url: URL) -> String {
+    static func rolloutID(from url: URL) -> String {
         let base = url.deletingPathExtension().lastPathComponent
+        if base == "transcript" || base == "transcript_full" {
+            let components = url.pathComponents
+            if let brainIndex = components.firstIndex(of: "brain"), brainIndex + 1 < components.count {
+                return components[brainIndex + 1]
+            }
+        }
         let parts = base.split(separator: "-")
         guard parts.count >= 5 else { return "" }
         return parts.suffix(5).joined(separator: "-")
@@ -234,6 +258,6 @@ enum SessionDiscovery {
         fileURLWithPath: NSString("~/.codex/sessions").expandingTildeInPath,
         isDirectory: true)
     static let defaultAgySessionsDir: URL = URL(
-        fileURLWithPath: NSString("~/.agy/sessions").expandingTildeInPath,
+        fileURLWithPath: NSString("~/.gemini/antigravity-cli/brain").expandingTildeInPath,
         isDirectory: true)
 }

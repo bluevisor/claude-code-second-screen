@@ -61,6 +61,10 @@ final class AppEnvironment: ObservableObject {
         case deg0 = 0, deg90 = 90, deg180 = 180, deg270 = 270
         var id: Int { rawValue }
         var label: String { "\(rawValue)°" }
+        /// 90°/270° swap width/height — renderers should lay out for a
+        /// portrait canvas so panels stack vertically instead of being
+        /// drawn landscape and then visually tipped on their side.
+        var isPortrait: Bool { self == .deg90 || self == .deg270 }
     }
 
     /// Which on-screen layout the LCD is showing. Matrix + Cozy are full
@@ -108,7 +112,21 @@ final class AppEnvironment: ObservableObject {
     /// Discovered live every telemetry tick — bound to the menubar picker.
     @Published private(set) var activeSessions: [ActiveSession] = []
     @Published var showRain: Bool { didSet { Defaults.showRain = showRain } }
-    @Published var rotation: DisplayRotation { didSet { Defaults.rotation = rotation.rawValue } }
+    @Published var rotation: DisplayRotation {
+        didSet {
+            // didSet still fires when SwiftUI hands us the same value
+            // back; gate everything on a real change so we never
+            // re-enter reconfigure as a side effect of an unrelated UI
+            // refresh (e.g. the clock toggle re-rendering the toolbar).
+            guard oldValue != rotation else { return }
+            Defaults.rotation = rotation.rawValue
+            // Only rebuild when the canvas aspect ratio actually flips
+            // (0↔180 or 90↔270 stays on the same canvas).
+            if oldValue.isPortrait != rotation.isPortrait {
+                loop?.reconfigure()
+            }
+        }
+    }
     @Published var flipHorizontal: Bool { didSet { Defaults.flipHorizontal = flipHorizontal } }
     @Published var flipVertical: Bool { didSet { Defaults.flipVertical = flipVertical } }
     @Published var mode: RenderMode { didSet { Defaults.mode = mode.rawValue } }
@@ -131,11 +149,34 @@ final class AppEnvironment: ObservableObject {
             UserPrefs.update(dateFormat: dateFormat)
         }
     }
-    /// Manual override — when true the LCD shows the clock regardless of
-    /// whether the active source has telemetry. The clock fallback still
-    /// auto-engages when telemetry is absent, this just lets the user pin
-    /// it on (e.g. for an ambient desk look while keeping a busy session).
-    @Published var forceClock: Bool { didSet { Defaults.forceClock = forceClock } }
+    /// Clock-mode override. `.auto` falls back to the legacy behavior —
+    /// show the clock when telemetry has no content, otherwise the
+    /// dashboard. `.on` / `.off` pin the LCD to one mode regardless of
+    /// telemetry. The preview toolbar's clock button drives this so its
+    /// visual state and the actual displayed mode stay in sync.
+    enum ClockMode: String, CaseIterable, Hashable {
+        case auto, on, off
+    }
+    @Published var clockMode: ClockMode {
+        didSet { Defaults.clockMode = clockMode.rawValue }
+    }
+
+    /// Effective clock-mode for the current telemetry — what the LCD is
+    /// actually showing. Resolves `.auto` against the latest telemetry,
+    /// so reads stay correct as content comes and goes.
+    var wantsClock: Bool {
+        resolveWantsClock(for: telemetry)
+    }
+
+    /// Same resolution but against a specific telemetry snapshot — used by
+    /// FrameLoop to avoid re-reading `telemetry` mid-tick.
+    func resolveWantsClock(for tel: Telemetry) -> Bool {
+        switch clockMode {
+        case .on: return true
+        case .off: return false
+        case .auto: return !tel.hasContent
+        }
+    }
     /// PreviewWindow flips this on appear / off on disappear. FrameLoop
     /// reads it to skip the main-actor `updatePreview(image:)` hop when
     /// nothing on screen would render the new image — recovers a few
@@ -196,7 +237,12 @@ final class AppEnvironment: ObservableObject {
         self.timeFormat = TimeFormat(rawValue: Defaults.timeFormat) ?? .h12
         self.temperatureUnit = TemperatureUnit(rawValue: Defaults.temperatureUnit) ?? .fahrenheit
         self.dateFormat = DateFormat(rawValue: Defaults.dateFormat) ?? .usDot
-        self.forceClock = Defaults.forceClock
+        let resolvedClockMode = ClockMode(rawValue: Defaults.clockMode) ?? .auto
+        self.clockMode = resolvedClockMode
+        // didSet doesn't fire on the in-init assignment, so write the
+        // migrated value back explicitly. This lets users (and `defaults
+        // read`) observe the new key without first toggling the button.
+        Defaults.clockMode = resolvedClockMode.rawValue
         UserPrefs.update(timeFormat: self.timeFormat)
         UserPrefs.update(temperatureUnit: self.temperatureUnit)
         UserPrefs.update(dateFormat: self.dateFormat)
@@ -285,9 +331,19 @@ private enum Defaults {
         get { d.object(forKey: "flipHorizontal") as? Bool ?? false }
         set { d.set(newValue, forKey: "flipHorizontal") }
     }
-    static var forceClock: Bool {
-        get { d.object(forKey: "forceClock") as? Bool ?? false }
-        set { d.set(newValue, forKey: "forceClock") }
+    static var clockMode: String {
+        // Migrate the old boolean `forceClock` key on first read so users
+        // who pinned the clock on under the old model don't lose that
+        // state when the app upgrades.
+        get {
+            if let raw = d.string(forKey: "clockMode") { return raw }
+            if let legacy = d.object(forKey: "forceClock") as? Bool {
+                return legacy ? AppEnvironment.ClockMode.on.rawValue
+                              : AppEnvironment.ClockMode.auto.rawValue
+            }
+            return AppEnvironment.ClockMode.auto.rawValue
+        }
+        set { d.set(newValue, forKey: "clockMode") }
     }
     static var flipVertical: Bool {
         get { d.object(forKey: "flipVertical") as? Bool ?? false }
