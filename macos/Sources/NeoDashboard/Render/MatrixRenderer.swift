@@ -28,6 +28,46 @@ final class MatrixRenderer: @unchecked Sendable {
     /// vertical-stack layout used on 90°/270° rotations.
     private var isPortrait: Bool { size.height > size.width }
 
+    // MARK: - Cached gradients
+    //
+    // These depend only on the renderer's color space + (for vignette
+    // and background) canvas size — all instance-lifetime constants.
+    // `lazy var` is fine here: `MatrixRenderer` is single-threaded on
+    // the FrameLoop's work queue.
+    private lazy var backgroundGradient: CGGradient = {
+        CGGradient(colorsSpace: colorSpace,
+                   colors: [MatrixTheme.bgTop.cgColor,
+                            MatrixTheme.bgBot.cgColor] as CFArray,
+                   locations: [0, 1])!
+    }()
+    private lazy var vignetteGradient: CGGradient = {
+        // `drawVignette` is only ever called with strength=0.42 from the
+        // matrix-theme paths; bake it in. If we ever need variable
+        // strength, swap to a small per-strength cache.
+        CGGradient(colorsSpace: colorSpace,
+                   colors: [
+                    NSColor.black.withAlphaComponent(0).cgColor,
+                    NSColor.black.withAlphaComponent(0.42).cgColor,
+                   ] as CFArray,
+                   locations: [0, 1])!
+    }()
+    private lazy var panelBgGradient: CGGradient = {
+        CGGradient(colorsSpace: colorSpace,
+                   colors: [
+                    NSColor(srgbRed: 8/255.0, green: 22/255.0, blue: 18/255.0, alpha: 0.97).cgColor,
+                    NSColor(srgbRed: 4/255.0, green: 12/255.0, blue: 10/255.0, alpha: 0.94).cgColor,
+                   ] as CFArray,
+                   locations: [0, 1])!
+    }()
+    private lazy var panelSheenGradient: CGGradient = {
+        CGGradient(colorsSpace: colorSpace,
+                   colors: [
+                    NSColor(srgbRed: 41/255.0, green: 255/255.0, blue: 140/255.0, alpha: 12/255.0).cgColor,
+                    NSColor.black.withAlphaComponent(0).cgColor,
+                   ] as CFArray,
+                   locations: [0, 1])!
+    }()
+
     init(size: CGSize = MatrixTheme.canvasSize,
          showRain: Bool = true,
          rainFPS: Double = 12) {
@@ -178,10 +218,7 @@ final class MatrixRenderer: @unchecked Sendable {
 
     private func drawBackground(into ctx: CGContext, now: Date) {
         // Vertical phosphor gradient.
-        let grad = CGGradient(colorsSpace: colorSpace,
-            colors: [MatrixTheme.bgTop.cgColor, MatrixTheme.bgBot.cgColor] as CFArray,
-            locations: [0, 1])!
-        ctx.drawLinearGradient(grad,
+        ctx.drawLinearGradient(backgroundGradient,
                                start: CGPoint(x: 0, y: 0),
                                end: CGPoint(x: 0, y: size.height),
                                options: [])
@@ -204,22 +241,19 @@ final class MatrixRenderer: @unchecked Sendable {
     }
 
     /// CRT-style edge vignette — radial gradient from clear at the center
-    /// of the canvas to translucent black at the corners. `strength` is the
-    /// alpha at the outer edge; the inner clear radius scales with the
-    /// shorter canvas axis so the result reads the same on any size.
+    /// of the canvas to translucent black at the corners. The strength
+    /// is baked into `vignetteGradient` (0.42) since the only caller
+    /// passes that value; if other strengths are ever needed, swap to a
+    /// per-strength cache. Inner clear radius scales with the shorter
+    /// canvas axis so the result reads the same on any size.
     private func drawVignette(into ctx: CGContext, strength: CGFloat) {
+        _ = strength
         let centerX = size.width / 2
         let centerY = size.height / 2
         let innerRadius = min(size.width, size.height) * 0.32
         let outerRadius = hypot(centerX, centerY) * 1.05
-        let grad = CGGradient(colorsSpace: colorSpace,
-            colors: [
-                NSColor.black.withAlphaComponent(0).cgColor,
-                NSColor.black.withAlphaComponent(strength).cgColor,
-            ] as CFArray,
-            locations: [0, 1])!
         ctx.saveGState()
-        ctx.drawRadialGradient(grad,
+        ctx.drawRadialGradient(vignetteGradient,
             startCenter: CGPoint(x: centerX, y: centerY),
             startRadius: innerRadius,
             endCenter: CGPoint(x: centerX, y: centerY),
@@ -232,24 +266,14 @@ final class MatrixRenderer: @unchecked Sendable {
 
     private func drawPanel(_ ctx: CGContext, rect: CGRect) {
         // Translucent background gradient.
-        let bgGrad = CGGradient(colorsSpace: colorSpace,
-            colors: [
-                NSColor(srgbRed: 8/255.0, green: 22/255.0, blue: 18/255.0, alpha: 0.97).cgColor,
-                NSColor(srgbRed: 4/255.0, green: 12/255.0, blue: 10/255.0, alpha: 0.94).cgColor,
-            ] as CFArray, locations: [0, 1])!
         ctx.saveGState()
         ctx.addRect(rect); ctx.clip()
-        ctx.drawLinearGradient(bgGrad,
+        ctx.drawLinearGradient(panelBgGradient,
                                start: CGPoint(x: rect.minX, y: rect.minY),
                                end: CGPoint(x: rect.minX, y: rect.maxY),
                                options: [])
         // Subtle inner phosphor sheen.
-        let sheen = CGGradient(colorsSpace: colorSpace,
-            colors: [
-                NSColor(srgbRed: 41/255.0, green: 255/255.0, blue: 140/255.0, alpha: 12/255.0).cgColor,
-                NSColor.black.withAlphaComponent(0).cgColor,
-            ] as CFArray, locations: [0, 1])!
-        ctx.drawLinearGradient(sheen,
+        ctx.drawLinearGradient(panelSheenGradient,
                                start: CGPoint(x: rect.minX, y: rect.minY),
                                end: CGPoint(x: rect.maxX, y: rect.maxY),
                                options: [])
