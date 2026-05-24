@@ -329,11 +329,7 @@ final class MatrixRenderer: @unchecked Sendable {
                        position: capTopOrigin(rowMid: rowMid, font: sessFont, x: cx)) + 12
 
         // Right side — weekday + date.
-        let weekdayStr: String = {
-            let f = DateFormatter()
-            f.dateFormat = "EEEE"
-            return f.string(from: now).uppercased()
-        }()
+        let weekdayStr = MatrixTheme.weekday(now)
         let dateString = "\(weekdayStr)  \(dateText(now))"
         let dateWidth = stringWidth(dateString, font: dateFont)
         let dateX = rect.maxX - dateWidth
@@ -394,11 +390,7 @@ final class MatrixRenderer: @unchecked Sendable {
 
         // Agent label.
         let label = tel.agent.kind.uppercased().replacingOccurrences(of: "-", with: " ")
-        let weekday: String = {
-            let f = DateFormatter()
-            f.dateFormat = "EEE"
-            return f.string(from: now).uppercased()
-        }()
+        let weekday = MatrixTheme.weekday(now, short: true)
         let dateStr = "\(weekday) \(dateText(now))"
         let dateW = stringWidth(dateStr, font: dateFont)
         let labelMax = rect.maxX - dateW - 12 - cx
@@ -1244,12 +1236,13 @@ final class MatrixRenderer: @unchecked Sendable {
 
     private func capTopOrigin(rowMid: CGFloat, font: NSFont, x: CGFloat) -> CGPoint {
         // y_text = rowMid - capHeight/2 - (ascent - capHeight)
-        let y = rowMid - capHeight(of: font) / 2 - (font.ascender - capHeight(of: font))
+        let m = MatrixTheme.metrics(of: font)
+        let y = rowMid - m.capHeight / 2 - (m.ascender - m.capHeight)
         return CGPoint(x: x, y: y)
     }
 
     private func capHeight(of font: NSFont) -> CGFloat {
-        return font.capHeight > 0 ? font.capHeight : font.pointSize * 0.7
+        MatrixTheme.metrics(of: font).capHeight
     }
 
     /// Draw a string with its (x, y) interpreted as the top-left of the
@@ -1263,7 +1256,7 @@ final class MatrixRenderer: @unchecked Sendable {
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attrs))
         ctx.saveGState()
         // Move to baseline. Caller's y is "top of ascent"; baseline = y + ascent.
-        let baselineY = position.y + font.ascender
+        let baselineY = position.y + MatrixTheme.metrics(of: font).ascender
         ctx.textMatrix = .identity
         ctx.translateBy(x: position.x, y: baselineY)
         ctx.scaleBy(x: 1, y: -1)

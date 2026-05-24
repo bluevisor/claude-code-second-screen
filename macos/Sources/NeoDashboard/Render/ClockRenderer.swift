@@ -104,11 +104,7 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     }
 
     private func dateLabel(now: Date) -> String {
-        let weekday: String = {
-            let f = DateFormatter()
-            f.dateFormat = "EEEE"
-            return f.string(from: now).uppercased()
-        }()
+        let weekday = MatrixTheme.weekday(now)
         return "\(weekday)  \(dateText(now))"
     }
 
@@ -250,9 +246,7 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
                 return String(format: "%02d:%02d %@", h12,
                               comps.minute ?? 0, amPm(now))
             case .h24:
-                let f = DateFormatter()
-                f.dateFormat = "EEEE"
-                return f.string(from: now).uppercased()
+                return MatrixTheme.weekday(now)
             }
         }()
         let sw = stringWidth(sub, font: subFont)
