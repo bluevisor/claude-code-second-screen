@@ -90,6 +90,16 @@ final class MatrixRenderer: @unchecked Sendable {
         return ctx.makeImage()
     }()
 
+    /// Reusable bitmap context for the main render pass. Allocated
+    /// lazily on first render and reused for the lifetime of this
+    /// renderer instance (renderers are rebuilt on rotation flip, so
+    /// the canvas size is stable). Saves ~2.4 MB allocator churn per
+    /// frame compared to allocating fresh. `ctx.makeImage()` returns
+    /// a COW-shared CGImage; the next frame's first draw call triggers
+    /// a copy for any still-held image (preview-window path), so
+    /// downstream consumers never see torn pixels.
+    private var renderCtx: CGContext?
+
     init(size: CGSize = MatrixTheme.canvasSize,
          showRain: Bool = true,
          rainFPS: Double = 30) {
@@ -104,16 +114,12 @@ final class MatrixRenderer: @unchecked Sendable {
     /// composite — used by FrameLoop's fade machine.
     func render(_ tel: Telemetry, blink: Double, now: Date,
                 blackAlpha: Double = 0) -> CGImage? {
-        guard let ctx = CGContext(
-            data: nil,
-            width: Int(size.width),
-            height: Int(size.height),
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
+        guard let ctx = ensureRenderContext() else { return nil }
+
+        // Reset any CTM leftover from the previous frame and bracket
+        // the per-frame draws so saveGState/restoreGState pairs inside
+        // helpers can't drift the persistent context's state.
+        ctx.saveGState()
 
         // CGContext y-axis points up. We work in "screen coords" (y-down),
         // so flip the CTM once and stay there.
@@ -136,8 +142,26 @@ final class MatrixRenderer: @unchecked Sendable {
         // old post-process step that wrapped the final image.
         applyFade(into: ctx, alpha: blackAlpha)
 
-        guard let raw = ctx.makeImage() else { return nil }
+        let raw = ctx.makeImage()
+        ctx.restoreGState()
+        guard let raw else { return nil }
         return crt.process(raw) ?? raw
+    }
+
+    private func ensureRenderContext() -> CGContext? {
+        if let renderCtx { return renderCtx }
+        let ctx = CGContext(
+            data: nil,
+            width: Int(size.width),
+            height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        )
+        renderCtx = ctx
+        return ctx
     }
 
     /// Composite a translucent black fill across the whole canvas. Caller

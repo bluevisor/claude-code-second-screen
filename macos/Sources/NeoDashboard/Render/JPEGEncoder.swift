@@ -1,5 +1,9 @@
-// CGImage → JPEG Data via ImageIO. Reuses a single CFMutableData buffer
-// to avoid per-frame allocations on the hot path.
+// CGImage → JPEG Data via ImageIO. Allocates a fresh NSMutableData
+// per call — bridged-to-Data on return, released deterministically by
+// ARC when the caller drops it. Reusing one persistent buffer would
+// require copying the bytes into a fresh Data on return to avoid the
+// next encode mutating the value an earlier caller is still holding,
+// which negates the saving.
 
 import CoreGraphics
 import Foundation

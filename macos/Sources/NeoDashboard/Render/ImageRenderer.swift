@@ -15,6 +15,12 @@ final class ImageRenderer: FrameRenderer, @unchecked Sendable {
     /// Cached on the first successful load — bundle lookups + IIO decode are
     /// surprisingly expensive at 30 fps.
     private var cached: CGImage?
+    /// Reusable bitmap contexts for the render + clock paths.
+    /// See MatrixRenderer for the COW reasoning — we bracket every
+    /// frame in saveGState/restoreGState so the persistent CTM stays
+    /// clean across calls.
+    private var renderCtx: CGContext?
+    private var clockCtx: CGContext?
 
     init(resourceName: String,
          size: CGSize = CGSize(width: 1280, height: 480)) {
@@ -22,16 +28,23 @@ final class ImageRenderer: FrameRenderer, @unchecked Sendable {
         self.size = size
     }
 
-    func render(_ telemetry: Telemetry, blink: Double, now: Date,
-                blackAlpha: Double = 0) -> CGImage? {
-        guard let ctx = CGContext(
+    private func makeContext() -> CGContext? {
+        CGContext(
             data: nil,
             width: Int(size.width), height: Int(size.height),
             bitsPerComponent: 8, bytesPerRow: 0,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
                 | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
+        )
+    }
+
+    func render(_ telemetry: Telemetry, blink: Double, now: Date,
+                blackAlpha: Double = 0) -> CGImage? {
+        if renderCtx == nil { renderCtx = makeContext() }
+        guard let ctx = renderCtx else { return nil }
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
         ctx.translateBy(x: 0, y: size.height)
         ctx.scaleBy(x: 1, y: -1)
 
@@ -81,14 +94,10 @@ final class ImageRenderer: FrameRenderer, @unchecked Sendable {
     /// (Alliance blue, Horde red, Dragon Ball sand, …) while clearly
     /// communicating "no active session".
     func renderClock(blink: Double, now: Date, blackAlpha: Double = 0) -> CGImage? {
-        guard let ctx = CGContext(
-            data: nil,
-            width: Int(size.width), height: Int(size.height),
-            bitsPerComponent: 8, bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
+        if clockCtx == nil { clockCtx = makeContext() }
+        guard let ctx = clockCtx else { return nil }
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
         ctx.translateBy(x: 0, y: size.height)
         ctx.scaleBy(x: 1, y: -1)
 

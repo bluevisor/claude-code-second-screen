@@ -19,6 +19,11 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     /// strip weather, status pill. Invalidated when `date` or `weather`
     /// strings change (~minutely and ~10 min respectively).
     private var staticLayer: (key: String, image: CGImage)?
+    /// Reusable per-frame context. See MatrixRenderer for the COW note.
+    /// The cached-static-layer context (in cachedStaticLayer) is left
+    /// allocated fresh on each cache miss since misses happen once per
+    /// minute, not per frame.
+    private var renderCtx: CGContext?
 
     init(size: CGSize = MatrixTheme.canvasSize, showRain: Bool = true) {
         self.size = size
@@ -28,14 +33,19 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
 
     func render(_ telemetry: Telemetry, blink: Double, now: Date,
                 blackAlpha: Double = 0) -> CGImage? {
-        guard let ctx = CGContext(
-            data: nil,
-            width: Int(size.width), height: Int(size.height),
-            bitsPerComponent: 8, bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
+        if renderCtx == nil {
+            renderCtx = CGContext(
+                data: nil,
+                width: Int(size.width), height: Int(size.height),
+                bitsPerComponent: 8, bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                    | CGBitmapInfo.byteOrder32Little.rawValue
+            )
+        }
+        guard let ctx = renderCtx else { return nil }
+        ctx.saveGState()
+        defer { ctx.restoreGState() }
         ctx.translateBy(x: 0, y: size.height)
         ctx.scaleBy(x: 1, y: -1)
 
