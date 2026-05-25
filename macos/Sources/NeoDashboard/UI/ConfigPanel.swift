@@ -26,19 +26,13 @@ struct ConfigPanel: View {
                 }
             }
             Section("Location") {
-                // If an IP fallback is cached, a normal refresh will not
-                // reach CoreLocation. This explicitly foregrounds us,
-                // drops the cache, and asks for a precise fix again.
-                Button {
-                    NSApp.activate(ignoringOtherApps: true)
-                    WeatherService.shared.requestPreciseLocationNow()
-                } label: {
-                    Label("Use precise location",
-                          systemImage: "location.circle")
-                }
-                .help("Re-trigger the macOS Location prompt and refresh weather. "
-                      + "If denied, you can re-enable from System Settings → "
-                      + "Privacy & Security → Location Services.")
+                Toggle("Use precise location", isOn: $env.usePreciseLocation)
+                    .help("On: ask CoreLocation for neighborhood-accurate "
+                          + "coordinates (Wi-Fi/BT fingerprinting). Off: "
+                          + "use IP-based geolocation only. If macOS has "
+                          + "previously denied the permission, re-enable "
+                          + "from System Settings → Privacy & Security → "
+                          + "Location Services.")
             }
             if env.mode == .matrixDashboard {
                 Section("Matrix") {

@@ -149,6 +149,18 @@ final class AppEnvironment: ObservableObject {
             UserPrefs.update(dateFormat: dateFormat)
         }
     }
+    /// When on, WeatherService asks CoreLocation for a precise fix
+    /// (and falls back to IP only on denial / timeout). When off, it
+    /// skips CoreLocation entirely and uses IP geolocation. Default on
+    /// — most users want neighborhood accuracy once they've granted
+    /// the permission.
+    @Published var usePreciseLocation: Bool {
+        didSet {
+            guard oldValue != usePreciseLocation else { return }
+            Defaults.usePreciseLocation = usePreciseLocation
+            WeatherService.shared.setUsePreciseLocation(usePreciseLocation)
+        }
+    }
     /// Clock-mode override. `.auto` falls back to the legacy behavior —
     /// show the clock when telemetry has no content, otherwise the
     /// dashboard. `.on` / `.off` pin the LCD to one mode regardless of
@@ -237,6 +249,7 @@ final class AppEnvironment: ObservableObject {
         self.timeFormat = TimeFormat(rawValue: Defaults.timeFormat) ?? .h12
         self.temperatureUnit = TemperatureUnit(rawValue: Defaults.temperatureUnit) ?? .fahrenheit
         self.dateFormat = DateFormat(rawValue: Defaults.dateFormat) ?? .usDot
+        self.usePreciseLocation = Defaults.usePreciseLocation
         let resolvedClockMode = ClockMode(rawValue: Defaults.clockMode) ?? .auto
         self.clockMode = resolvedClockMode
         // didSet doesn't fire on the in-init assignment, so write the
@@ -253,6 +266,10 @@ final class AppEnvironment: ObservableObject {
 
     func start() {
         FontRegistration.registerOnce()
+        // Apply persisted location preference before the first refresh,
+        // so a user who turned precise location off won't see the
+        // CoreLocation prompt re-surface on launch.
+        WeatherService.shared.setUsePreciseLocation(usePreciseLocation)
         WeatherService.shared.start()
         let loop = FrameLoop(env: self)
         self.loop = loop
@@ -364,5 +381,9 @@ private enum Defaults {
     static var dateFormat: String {
         get { d.string(forKey: "dateFormat") ?? "MM.DD.YYYY" }
         set { d.set(newValue, forKey: "dateFormat") }
+    }
+    static var usePreciseLocation: Bool {
+        get { d.object(forKey: "usePreciseLocation") as? Bool ?? true }
+        set { d.set(newValue, forKey: "usePreciseLocation") }
     }
 }

@@ -26,6 +26,10 @@ final class WeatherService: @unchecked Sendable {
         /// refreshes on the normal 10-minute cadence.
         var place: ResolvedPlace?
         var placeFetchedAt: TimeInterval = 0
+        /// User-controlled — when false, `resolvePlace` skips
+        /// CoreLocation entirely and uses IP geolocation. Defaults to
+        /// true; ConfigPanel surfaces it as a toggle.
+        var usePreciseLocation = true
     }
     private struct ResolvedPlace {
         let city: String
@@ -91,6 +95,25 @@ final class WeatherService: @unchecked Sendable {
             s.place = nil
             s.placeFetchedAt = 0
             s.refreshRequested = true
+        }
+    }
+
+    /// Toggle the precise-location preference. Turning on drops the
+    /// cached IP-based place and triggers an immediate refresh that
+    /// will route through CoreLocation; turning off just flips the
+    /// flag and the next cache miss will go straight to IP geo.
+    func setUsePreciseLocation(_ on: Bool) {
+        state.withLock { s in
+            guard s.usePreciseLocation != on else { return }
+            s.usePreciseLocation = on
+            if on {
+                s.place = nil
+                s.placeFetchedAt = 0
+                s.refreshRequested = true
+            }
+        }
+        if on {
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
@@ -160,7 +183,15 @@ final class WeatherService: @unchecked Sendable {
         }
 
         let place: ResolvedPlace
-        let (coords, why) = await locator.requestLocationWithReason()
+        let usePrecise = state.withLock { $0.usePreciseLocation }
+        let coords: CLLocation?
+        let why: String
+        if usePrecise {
+            (coords, why) = await locator.requestLocationWithReason()
+        } else {
+            coords = nil
+            why = "precise location disabled by user"
+        }
         if let coords {
             let (city, region) = await reverseGeocode(coords)
             place = ResolvedPlace(city: city.uppercased(),
