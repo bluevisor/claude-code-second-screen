@@ -29,9 +29,10 @@ final class FrameLoop {
     private let workQueue = DispatchQueue(label: "tech.bluevisor.NeoDashboard.render",
                                           qos: .userInteractive)
     /// Cross-thread state for the worker queue. `inFlight` coalesces frame
-    /// ticks so the wall clock can't lag behind a backed-up HID pipeline;
-    /// `lcdOpen` flips once after the first successful HID handshake.
-    private struct WorkerState { var inFlight = false; var lcdOpen = false }
+    /// ticks so the wall clock can't lag behind a backed-up HID pipeline.
+    /// LCD connection state is owned by the driver now (`startMonitoring`)
+    /// so we no longer track it here.
+    private struct WorkerState { var inFlight = false }
     private let workerState = OSAllocatedUnfairLock(initialState: WorkerState())
     /// Reusable CGContext for the orientation pass, keyed by output
     /// dimensions. Lives on `workQueue` (serial) so access doesn't need
@@ -58,7 +59,7 @@ final class FrameLoop {
     func start() {
         guard let env else { return }
         rebuildRenderers(env: env)
-        openLCDIfNeeded()
+        startLCDMonitoringIfNeeded()
         scheduleTimers(fps: env.targetFPS)
     }
 
@@ -310,34 +311,28 @@ final class FrameLoop {
         }
     }
 
-    private func openLCDIfNeeded() {
-        guard let env else { return }
-        let alreadyOpen = workerState.withLock { $0.lcdOpen }
-        guard env.pushToLCD, !alreadyOpen else { return }
-        // Defer the @Published write to the next main-actor tick so we
-        // never publish during a SwiftUI view-update pass — `start()` /
-        // `reconfigure()` are both called from contexts that may be
-        // inside a view body (rotation binding setter, theme picker
-        // button) and a synchronous publish there trips
-        // "Publishing changes from within view updates is not allowed".
-        Task { @MainActor [weak env] in env?.updateLCDStatus(.connecting) }
+    /// Wire the driver's hot-plug-aware monitoring. The driver keeps an
+    /// IOHIDManager alive for the app lifetime; its match/removal
+    /// callbacks fire on the main runloop and the handshake runs on
+    /// our work queue. State changes are routed back to
+    /// `env.updateLCDStatus` so the menu bar reflects reality whether
+    /// the LCD is plugged in at launch or hot-plugged later.
+    ///
+    /// `onState` is called on the main thread by the driver. We hop
+    /// through `Task { @MainActor in … }` to satisfy the @MainActor
+    /// isolation of `updateLCDStatus` without assuming the call thread.
+    private func startLCDMonitoringIfNeeded() {
+        guard let env, env.pushToLCD else { return }
         let driver = env.driver
-        let workerState = self.workerState
-        let logger = self.logger
-        workQueue.async { [weak env] in
-            do {
-                try driver.open()
-                let (w, h) = driver.resolution
-                workerState.withLock { $0.lcdOpen = true }
-                Task { @MainActor in
-                    env?.updateLCDStatus(.ready(width: w, height: h))
-                }
-            } catch {
-                Task { @MainActor [error] in
-                    env?.updateLCDStatus(.error(error.localizedDescription))
-                }
-                logger.error("LCD open failed: \(error.localizedDescription, privacy: .public)")
+        driver.startMonitoring(workQueue: workQueue) { [weak env] state in
+            let mapped: AppEnvironment.LCDStatus
+            switch state {
+            case .disconnected:           mapped = .disconnected
+            case .connecting:             mapped = .connecting
+            case .ready(let w, let h):    mapped = .ready(width: w, height: h)
+            case .error(let msg):         mapped = .error(msg)
             }
+            Task { @MainActor in env?.updateLCDStatus(mapped) }
         }
     }
 }
