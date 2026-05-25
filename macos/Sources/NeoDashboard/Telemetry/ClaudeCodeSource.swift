@@ -34,6 +34,12 @@ final class ClaudeCodeSource: TelemetrySource {
     private var lastStatus: AgentStatus = .idle
     private var statusStarted: Date = .now
     private var scannedOtherSessions = false
+    /// Bounds on the in-memory event ring. Long-running Claude sessions
+    /// (8h+ of dense agent loops) otherwise grow `events` without limit;
+    /// each tick then re-scans the whole array several times. Mirrors
+    /// CodexSource's caps.
+    private let maxRetainedEvents = 4_000
+    private let maxRetainedTokenSamples = 2_000
 
     init(projectsDir: URL? = nil, sessionsDir: URL? = nil) {
         self.plan = ClaudePlan.detect()
@@ -188,6 +194,22 @@ final class ClaudeCodeSource: TelemetrySource {
                     ))
                 }
             }
+        }
+        trimBuffers()
+    }
+
+    /// Keep the in-memory event ring bounded. Claude rewrites cwd /
+    /// sessionId / gitBranch on every assistant line, so the session
+    /// header isn't load-bearing — a simple tail-trim is safe for
+    /// derivation. Cumulative token totals shown on the dashboard may
+    /// drift after the buffer wraps; rolling-window quotas use
+    /// `tokenHistory` (also bounded) which is what actually feeds 5H/7D.
+    private func trimBuffers() {
+        if events.count > maxRetainedEvents {
+            events.removeFirst(events.count - maxRetainedEvents)
+        }
+        if tokenHistory.count > maxRetainedTokenSamples {
+            tokenHistory.removeFirst(tokenHistory.count - maxRetainedTokenSamples)
         }
     }
 

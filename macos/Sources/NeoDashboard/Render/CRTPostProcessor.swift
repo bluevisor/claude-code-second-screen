@@ -27,6 +27,13 @@ final class CRTPostProcessor {
     // on the channel filter output, which is a lightweight CIImage op.
     private var redShift = CGAffineTransform.identity
     private var blueShift = CGAffineTransform.identity
+    /// Counter for periodic CIContext.clearCaches() — the Metal
+    /// intermediate-texture cache grows monotonically across
+    /// createCGImage calls and is documented as unbounded; without a
+    /// periodic flush it pins hundreds of MB of GPU memory over hours.
+    /// Flush every ~30 s at 30 fps.
+    private var framesSinceFlush = 0
+    private let framesPerFlush = 900
 
     init() {
         // Skip the software fallback — we ship to Metal-capable Macs only.
@@ -81,6 +88,12 @@ final class CRTPostProcessor {
         combineRGB.backgroundImage = blueShifted
         guard let combined = combineRGB.outputImage else { return image }
 
-        return context.createCGImage(combined.cropped(to: extent), from: extent) ?? image
+        let result = context.createCGImage(combined.cropped(to: extent), from: extent) ?? image
+        framesSinceFlush += 1
+        if framesSinceFlush >= framesPerFlush {
+            framesSinceFlush = 0
+            context.clearCaches()
+        }
+        return result
     }
 }

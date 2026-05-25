@@ -149,35 +149,43 @@ final class FrameLoop {
 
         workQueue.async { [weak env] in
             defer { workerState.withLock { $0.inFlight = false } }
-            let base: CGImage?
-            if clockMode {
-                // Prefer the active renderer's themed clock; fall back to
-                // the generic phosphor one if it doesn't override.
-                base = activeRenderer.renderClock(blink: phase, now: now,
-                                                  blackAlpha: blackAlpha)
-                    ?? clockRenderer.render(tel, blink: phase, now: now,
-                                            blackAlpha: blackAlpha)
-            } else {
-                base = activeRenderer.render(tel, blink: phase, now: now,
-                                             blackAlpha: blackAlpha)
-            }
-            guard let raw = base else { return }
-            // LCD gets the oriented frame; preview always shows the raw
-            // landscape so the user can read it on screen. When nothing
-            // re-orients the frame (the common case), `lcdImg === raw` and
-            // we only need to JPEG-encode once.
-            let lcdImg = Self.oriented(raw, pool: orientationCtx,
-                                       rotation: rotation,
-                                       flipH: flipH, flipV: flipV) ?? raw
-            if pushToLCD, let jpeg = encoder.encode(lcdImg) {
-                _ = driver.send(jpeg)
-            }
-            // Preview CGImage update is throttled by whether the window
-            // is on-screen — when it's closed, nothing reads
-            // `lastFramePreview` so we skip the main-actor hop entirely.
-            if previewVisible {
-                Task { @MainActor in
-                    env?.updatePreview(image: raw)
+            // Background DispatchQueues don't drain the thread's
+            // autorelease pool between blocks, so without an explicit
+            // pool every NSColor/NSAttributedString/CTLine/NSMutableData
+            // allocated by the render + JPEG path piles up indefinitely.
+            // Over hours at 30 fps this is the source of multi-GB
+            // residency growth that drags the whole machine into swap.
+            autoreleasepool {
+                let base: CGImage?
+                if clockMode {
+                    // Prefer the active renderer's themed clock; fall back to
+                    // the generic phosphor one if it doesn't override.
+                    base = activeRenderer.renderClock(blink: phase, now: now,
+                                                      blackAlpha: blackAlpha)
+                        ?? clockRenderer.render(tel, blink: phase, now: now,
+                                                blackAlpha: blackAlpha)
+                } else {
+                    base = activeRenderer.render(tel, blink: phase, now: now,
+                                                 blackAlpha: blackAlpha)
+                }
+                guard let raw = base else { return }
+                // LCD gets the oriented frame; preview always shows the raw
+                // landscape so the user can read it on screen. When nothing
+                // re-orients the frame (the common case), `lcdImg === raw` and
+                // we only need to JPEG-encode once.
+                let lcdImg = Self.oriented(raw, pool: orientationCtx,
+                                           rotation: rotation,
+                                           flipH: flipH, flipV: flipV) ?? raw
+                if pushToLCD, let jpeg = encoder.encode(lcdImg) {
+                    _ = driver.send(jpeg)
+                }
+                // Preview CGImage update is throttled by whether the window
+                // is on-screen — when it's closed, nothing reads
+                // `lastFramePreview` so we skip the main-actor hop entirely.
+                if previewVisible {
+                    Task { @MainActor in
+                        env?.updatePreview(image: raw)
+                    }
                 }
             }
         }
