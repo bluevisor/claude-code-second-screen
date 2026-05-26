@@ -67,6 +67,15 @@ final class MatrixRenderer: @unchecked Sendable {
                    ] as CFArray,
                    locations: [0, 1])!
     }()
+    private lazy var railSeparatorGradient: CGGradient = {
+        CGGradient(colorsSpace: colorSpace,
+                   colors: [
+                    MatrixTheme.phosphor.withAlphaComponent(0).cgColor,
+                    MatrixTheme.phosphor.withAlphaComponent(0.30).cgColor,
+                    MatrixTheme.phosphor.withAlphaComponent(0).cgColor,
+                   ] as CFArray,
+                   locations: [0, 0.5, 1])!
+    }()
 
     /// Pre-baked scanline strap — 1px black rows every 2px at the
     /// renderer's only caller-opacity (0.78), composited as a single
@@ -432,16 +441,10 @@ final class MatrixRenderer: @unchecked Sendable {
         let sepLeft = cx + 4
         let sepRight = dateX - 12
         if sepRight > sepLeft {
-            let sepGrad = CGGradient(colorsSpace: colorSpace,
-                colors: [
-                    MatrixTheme.phosphor.withAlphaComponent(0).cgColor,
-                    MatrixTheme.phosphor.withAlphaComponent(0.30).cgColor,
-                    MatrixTheme.phosphor.withAlphaComponent(0).cgColor,
-                ] as CFArray, locations: [0, 0.5, 1])!
             ctx.saveGState()
             ctx.addRect(CGRect(x: sepLeft, y: rowMid, width: sepRight - sepLeft, height: 1))
             ctx.clip()
-            ctx.drawLinearGradient(sepGrad,
+            ctx.drawLinearGradient(railSeparatorGradient,
                                    start: CGPoint(x: sepLeft, y: rowMid),
                                    end: CGPoint(x: sepRight, y: rowMid),
                                    options: [])

@@ -26,21 +26,31 @@ import Foundation
 final class AnimalCrossingRenderer: FrameRenderer, @unchecked Sendable {
     private let size: CGSize
     private let colorSpace = CGColorSpaceCreateDeviceRGB()
+    private var renderCtx: CGContext?
+    private var clockCtx: CGContext?
 
     init(size: CGSize = CGSize(width: 1280, height: 480)) {
         self.size = size
     }
 
-    func render(_ tel: Telemetry, blink: Double, now: Date,
-                blackAlpha: Double = 0) -> CGImage? {
-        guard let ctx = CGContext(
+    private func ensureContext(_ ctx: inout CGContext?) -> CGContext? {
+        if let ctx { return ctx }
+        let new = CGContext(
             data: nil,
             width: Int(size.width), height: Int(size.height),
             bitsPerComponent: 8, bytesPerRow: 0,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
                 | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
+        )
+        ctx = new
+        return new
+    }
+
+    func render(_ tel: Telemetry, blink: Double, now: Date,
+                blackAlpha: Double = 0) -> CGImage? {
+        guard let ctx = ensureContext(&renderCtx) else { return nil }
+        ctx.saveGState()
         ctx.translateBy(x: 0, y: size.height)
         ctx.scaleBy(x: 1, y: -1)
 
@@ -107,20 +117,16 @@ final class AnimalCrossingRenderer: FrameRenderer, @unchecked Sendable {
         drawStatsColumn(ctx, rect: statsRect, palette: palette, tel: tel)
 
         applyFade(into: ctx, alpha: blackAlpha)
-        return ctx.makeImage()
+        let img = ctx.makeImage()
+        ctx.restoreGState()
+        return img
     }
 
     /// Themed idle/clock view — keeps the wood plank backdrop and the
     /// cream paper card, swapping the body for a huge rounded HH:MM.
     func renderClock(blink: Double, now: Date, blackAlpha: Double = 0) -> CGImage? {
-        guard let ctx = CGContext(
-            data: nil,
-            width: Int(size.width), height: Int(size.height),
-            bitsPerComponent: 8, bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
-                | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
+        guard let ctx = ensureContext(&clockCtx) else { return nil }
+        ctx.saveGState()
         ctx.translateBy(x: 0, y: size.height)
         ctx.scaleBy(x: 1, y: -1)
 
@@ -189,7 +195,9 @@ final class AnimalCrossingRenderer: FrameRenderer, @unchecked Sendable {
                         x: size.width / 2 - napW / 2, midY: bodyMid + 110)
 
         applyFade(into: ctx, alpha: blackAlpha)
-        return ctx.makeImage()
+        let img = ctx.makeImage()
+        ctx.restoreGState()
+        return img
     }
 
     /// Translucent black overlay used by FrameLoop's fade transitions.

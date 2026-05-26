@@ -33,7 +33,7 @@ final class CRTPostProcessor {
     /// periodic flush it pins hundreds of MB of GPU memory over hours.
     /// Flush every ~30 s at 30 fps.
     private var framesSinceFlush = 0
-    private let framesPerFlush = 900
+    private let framesPerFlush = 150
 
     init() {
         // Skip the software fallback — we ship to Metal-capable Macs only.

@@ -25,6 +25,33 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     /// minute, not per frame.
     private var renderCtx: CGContext?
 
+    private lazy var vignetteGradient: CGGradient = {
+        CGGradient(colorsSpace: colorSpace,
+                   colors: [
+                    NSColor.black.withAlphaComponent(0).cgColor,
+                    NSColor.black.withAlphaComponent(0.42).cgColor,
+                   ] as CFArray,
+                   locations: [0, 1])!
+    }()
+
+    private lazy var scanlineImage: CGImage? = {
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.30 * 0.78).cgColor)
+        var y: CGFloat = 0
+        while y < size.height {
+            ctx.fill(CGRect(x: 0, y: y, width: size.width, height: 1))
+            y += 2
+        }
+        return ctx.makeImage()
+    }()
+
     init(size: CGSize = MatrixTheme.canvasSize, showRain: Bool = true) {
         self.size = size
         self.showRain = showRain
@@ -277,28 +304,22 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     // MARK: - Scanlines / vignette
 
     private func drawScanlines(into ctx: CGContext, opacity: CGFloat) {
+        _ = opacity
+        guard let img = scanlineImage else { return }
         ctx.saveGState()
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.30 * opacity).cgColor)
-        var y: CGFloat = 0
-        while y < size.height {
-            ctx.fill(CGRect(x: 0, y: y, width: size.width, height: 1))
-            y += 2
-        }
+        ctx.translateBy(x: 0, y: size.height)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: size.width, height: size.height))
         ctx.restoreGState()
     }
 
     private func drawVignette(into ctx: CGContext, strength: CGFloat) {
+        _ = strength
         let centerX = size.width / 2
         let centerY = size.height / 2
         let inner = min(size.width, size.height) * 0.32
         let outer = hypot(centerX, centerY) * 1.05
-        let grad = CGGradient(colorsSpace: colorSpace,
-            colors: [
-                NSColor.black.withAlphaComponent(0).cgColor,
-                NSColor.black.withAlphaComponent(strength).cgColor,
-            ] as CFArray,
-            locations: [0, 1])!
-        ctx.drawRadialGradient(grad,
+        ctx.drawRadialGradient(vignetteGradient,
             startCenter: CGPoint(x: centerX, y: centerY),
             startRadius: inner,
             endCenter: CGPoint(x: centerX, y: centerY),

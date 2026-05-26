@@ -11,6 +11,7 @@ import CoreGraphics
 import Foundation
 import os
 import os.log
+import os
 
 @MainActor
 final class FrameLoop {
@@ -38,6 +39,9 @@ final class FrameLoop {
     /// dimensions. Lives on `workQueue` (serial) so access doesn't need
     /// extra locking. Allocated lazily on first non-zero rotation.
     private let orientationCtx = OrientationContextPool()
+
+    private var lastDiagnosticLog = Date()
+    private var skippedFrames = 0
 
     /// Transition state between dashboard ↔ clock fallback. A swap fades
     /// the *current* renderer out to black, switches, then fades the new
@@ -114,6 +118,8 @@ final class FrameLoop {
 
     private func renderTick() {
         guard let env else { return }
+        // Track skipped frames
+        let frameStartTime = Date()
         // Coalesce: if HID is still pushing the previous frame, skip this
         // tick entirely. The next tick will pick up fresh telemetry + now.
         let shouldRun = workerState.withLock { s -> Bool in
@@ -121,7 +127,7 @@ final class FrameLoop {
             s.inFlight = true
             return true
         }
-        guard shouldRun else { return }
+        guard shouldRun else { skippedFrames += 1; return }
 
         let tel = env.telemetry
         let pushToLCD = env.pushToLCD
@@ -147,7 +153,7 @@ final class FrameLoop {
         let previewVisible = env.previewWindowVisible
         let orientationCtx = self.orientationCtx
 
-        workQueue.async { [weak env] in
+        workQueue.async { [weak env, self] in
             defer { workerState.withLock { $0.inFlight = false } }
             // Background DispatchQueues don't drain the thread's
             // autorelease pool between blocks, so without an explicit
@@ -185,6 +191,19 @@ final class FrameLoop {
                 if previewVisible {
                     Task { @MainActor in
                         env?.updatePreview(image: raw)
+                    }
+                }
+                // Periodic diagnostics every 10 seconds
+                let now = Date()
+                Task { @MainActor in
+                    if now.timeIntervalSince(self.lastDiagnosticLog) > 10 {
+                        let usedMB = Self.currentMemoryUsageMB()
+                        self.logger.info("[framedrop diag] mem: \(usedMB) MB, skipped: \(self.skippedFrames)")
+                        if usedMB > 1800 {
+                            self.logger.error("[framedrop diag] HIGH MEMORY: \(usedMB) MB, skipped: \(self.skippedFrames)")
+                        }
+                        self.lastDiagnosticLog = now
+                        self.skippedFrames = 0
                     }
                 }
             }
@@ -341,6 +360,21 @@ final class FrameLoop {
             case .error(let msg):         mapped = .error(msg)
             }
             Task { @MainActor in env?.updateLCDStatus(mapped) }
+        }
+    }
+
+    private static func currentMemoryUsageMB() -> Int {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
+        let kerr: kern_return_t = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        if kerr == KERN_SUCCESS {
+            return Int(info.resident_size) / (1024 * 1024)
+        } else {
+            return -1
         }
     }
 }
