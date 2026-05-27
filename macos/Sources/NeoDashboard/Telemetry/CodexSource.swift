@@ -86,6 +86,8 @@ final class CodexSource: TelemetrySource {
     private let reasoningConfigInterval: TimeInterval = 5
     private let maxRetainedEvents = 4_000
     private let maxRetainedTokenSamples = 2_000
+    private var dirty = true
+    private var cachedTelemetry: Telemetry?
 
     init(kind: CodexAgentKind = .codex, sessionsDirs: [URL]? = nil) {
         self.kind = kind
@@ -99,7 +101,11 @@ final class CodexSource: TelemetrySource {
     func tick() -> Telemetry {
         refreshActiveFile()
         tailNewLines()
-        return buildTelemetry()
+        if dirty {
+            cachedTelemetry = buildTelemetry()
+            dirty = false
+        }
+        return cachedTelemetry ?? .empty()
     }
 
     func setPinned(_ url: URL?) {
@@ -110,6 +116,7 @@ final class CodexSource: TelemetrySource {
         events.removeAll(keepingCapacity: true)
         latencies.removeAll(keepingCapacity: true)
         lastDiscoveryAt = 0
+        dirty = true
     }
 
     // MARK: - File discovery + tailing
@@ -132,6 +139,7 @@ final class CodexSource: TelemetrySource {
             events.removeAll(keepingCapacity: true)
             latencies.removeAll(keepingCapacity: true)
             tokenHistory.removeAll(keepingCapacity: true)
+            dirty = true
         }
     }
 
@@ -183,6 +191,7 @@ final class CodexSource: TelemetrySource {
         }
 
         if size == offset { return }
+        dirty = true
 
         guard let fh = try? FileHandle(forReadingFrom: url) else { return }
         defer { try? fh.close() }

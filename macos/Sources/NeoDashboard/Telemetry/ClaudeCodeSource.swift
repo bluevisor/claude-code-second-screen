@@ -34,6 +34,8 @@ final class ClaudeCodeSource: TelemetrySource {
     private var lastStatus: AgentStatus = .idle
     private var statusStarted: Date = .now
     private var scannedOtherSessions = false
+    private var dirty = true
+    private var cachedTelemetry: Telemetry?
     /// Bounds on the in-memory event ring. Long-running Claude sessions
     /// (8h+ of dense agent loops) otherwise grow `events` without limit;
     /// each tick then re-scans the whole array several times. Mirrors
@@ -57,8 +59,13 @@ final class ClaudeCodeSource: TelemetrySource {
         if !scannedOtherSessions {
             bootstrapTokenHistoryFromOtherSessions()
             scannedOtherSessions = true
+            dirty = true
         }
-        return promoteByRegistryStatus(buildTelemetry())
+        if dirty {
+            cachedTelemetry = buildTelemetry()
+            dirty = false
+        }
+        return promoteByRegistryStatus(cachedTelemetry ?? .empty())
     }
 
     /// Claude's "Searching…" / "Thinking…" UI states sit between jsonl
@@ -85,11 +92,11 @@ final class ClaudeCodeSource: TelemetrySource {
     func setPinned(_ url: URL?) {
         if pinned == url { return }
         pinned = url
-        // Force a reload on next refresh.
         jsonl = nil
         offset = 0
         events.removeAll(keepingCapacity: true)
         latencies.removeAll(keepingCapacity: true)
+        dirty = true
     }
 
     // MARK: - File discovery + tailing
@@ -111,6 +118,7 @@ final class ClaudeCodeSource: TelemetrySource {
             offset = 0
             events.removeAll(keepingCapacity: true)
             latencies.removeAll(keepingCapacity: true)
+            dirty = true
         }
     }
 
@@ -155,6 +163,7 @@ final class ClaudeCodeSource: TelemetrySource {
             events.removeAll(keepingCapacity: true)
         }
         if size == offset { return }
+        dirty = true
 
         guard let fh = try? FileHandle(forReadingFrom: url) else { return }
         defer { try? fh.close() }

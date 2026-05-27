@@ -1,9 +1,11 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 struct MenuBarContent: View {
     @EnvironmentObject private var env: AppEnvironment
     @Environment(\.openWindow) private var openWindow
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -36,6 +38,22 @@ struct MenuBarContent: View {
         VStack(alignment: .leading, spacing: 2) {
             MenuRow(title: "Preview", icon: "rectangle.on.rectangle") {
                 showPreview()
+            }
+            Toggle(isOn: $launchAtLogin) {
+                Label("Launch at Login", systemImage: "arrow.right.circle")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .padding(.vertical, 2)
+            .padding(.horizontal, 8)
+            .onChange(of: launchAtLogin) { _, on in
+                do {
+                    if on { try SMAppService.mainApp.register() }
+                    else { try SMAppService.mainApp.unregister() }
+                } catch {
+                    launchAtLogin = SMAppService.mainApp.status == .enabled
+                }
             }
             Divider().padding(.vertical, 4)
             MenuRow(title: "Quit", icon: "power") {
