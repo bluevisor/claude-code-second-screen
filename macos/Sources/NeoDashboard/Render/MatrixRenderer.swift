@@ -207,7 +207,7 @@ final class MatrixRenderer: @unchecked Sendable {
         let padBot: CGFloat = 12
         let railH: CGFloat = 34
         let footerH: CGFloat = 38
-        let gapAbove: CGFloat = 10
+        let gapAbove: CGFloat = 8
         let gapBelow: CGFloat = 8
         let frameW = size.width - 2 * padX
         let mainH = size.height - padTop - padBot - railH - footerH - gapAbove - gapBelow
@@ -343,7 +343,7 @@ final class MatrixRenderer: @unchecked Sendable {
         let padBot: CGFloat = 12
         let railH: CGFloat = 34
         let footerH: CGFloat = 38
-        let gapAbove: CGFloat = 10
+        let gapAbove: CGFloat = 8
         let gapBelow: CGFloat = 8
         let frameW = size.width - 2 * padX
         let mainH = size.height - padTop - padBot - railH - footerH - gapAbove - gapBelow
