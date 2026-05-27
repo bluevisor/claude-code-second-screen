@@ -11,37 +11,16 @@ which model, context window fill, rolling 5-hour / 7-day token totals, log of
 recent tool calls — directly onto a USB-attached LCD so you can glance at
 your agent without alt-tabbing.
 
-## Implementations
-
-### macOS native (current)
+## Getting started
 
 A native Swift/AppKit menu bar app in `macos/`. Renders at **30 fps** with a
 pipelined architecture — the render queue and HID transfer queue run in
 parallel, so frame throughput is limited by `max(pipeline, HID)` rather
 than the sum. Open the Xcode project in `macos/` and build.
 
-**Data sources** — auto-detects the newest active Claude Code or Codex
-session via `SessionDiscovery`. Falls back to a clock-only display when
-no session is active.
-
-### Python (original)
-
-The original cross-platform Python implementation in `agent_dashboard/`.
-Runs on Linux (Raspberry Pi) and macOS via Qt offscreen rendering and
-`thermalright-trcc-linux` / `hidapi` for USB transport.
-
-```bash
-# Linux
-sudo apt install pipx libusb-1.0-0 sg3-utils
-pipx install trcc-linux && trcc setup -y
-python3 -m venv .venv && .venv/bin/pip install -e .
-QT_QPA_PLATFORM=offscreen .venv/bin/python -m agent_dashboard
-
-# macOS
-brew install hidapi python@3.11
-python3.11 -m venv .venv && .venv/bin/pip install -e .
-.venv/bin/python -m agent_dashboard
-```
+Auto-detects the newest active Claude Code or Codex session via
+`SessionDiscovery`. Falls back to a clock-only display when no session
+is active.
 
 ## Hardware
 
@@ -54,7 +33,6 @@ python3.11 -m venv .venv && .venv/bin/pip install -e .
 |---|---|
 | **Matrix** *(default)* | Terminal CRT — three-panel grid with rain, scanlines, vignette |
 | **Clock** | Fallback clock display when no active session |
-| **Animal Crossing** | Cozy island-themed dashboard |
 
 ### Matrix · terminal CRT
 
@@ -150,7 +128,7 @@ HID queue.
 
 ## Limitations
 
-- **macOS only for the native app.** The Python version still works on Linux.
+- **macOS only.**
 - **No live rate-limit data.** The dashboard computes rolling token totals
   from the jsonl rather than reading API rate-limit headers.
 - **Single active session.** Always shows the most-recently-modified jsonl.
