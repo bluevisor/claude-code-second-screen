@@ -31,12 +31,16 @@ final class FrameLoop {
                                           qos: .userInteractive)
     private let telQueue = DispatchQueue(label: "tech.bluevisor.NeoDashboard.telemetry",
                                           qos: .utility)
+    private let hidQueue = DispatchQueue(label: "tech.bluevisor.NeoDashboard.hid",
+                                          qos: .userInteractive)
     /// Cross-thread state for the worker queue. `inFlight` coalesces frame
-    /// ticks so the wall clock can't lag behind a backed-up HID pipeline.
-    /// LCD connection state is owned by the driver now (`startMonitoring`)
-    /// so we no longer track it here.
+    /// ticks so the render pipeline can't queue up behind itself.
     private struct WorkerState { var inFlight = false }
     private let workerState = OSAllocatedUnfairLock(initialState: WorkerState())
+    /// Single-slot HID buffer. If the HID queue is still sending the
+    /// previous frame when a new one is ready, the new frame is dropped.
+    private struct HIDSlot { var inFlight = false; var dropped = 0 }
+    private let hidSlot = OSAllocatedUnfairLock(initialState: HIDSlot())
     /// Reusable CGContext for the orientation pass, keyed by output
     /// dimensions. Lives on `workQueue` (serial) so access doesn't need
     /// extra locking. Allocated lazily on first non-zero rotation.
@@ -181,13 +185,14 @@ final class FrameLoop {
         let encoder = self.encoder
         let driver = env.driver
         let workerState = self.workerState
+        let hidSlot = self.hidSlot
+        let hidQueue = self.hidQueue
         let previewVisible = env.previewWindowVisible
         let orientationCtx = self.orientationCtx
         let phaseTiming = self.phaseTiming
         let logger = self.logger
 
         workQueue.async { [weak env] in
-            defer { workerState.withLock { $0.inFlight = false } }
             autoreleasepool {
                 let t0 = CACurrentMediaTime()
                 let base: CGImage?
@@ -201,7 +206,10 @@ final class FrameLoop {
                                                  blackAlpha: blackAlpha)
                 }
                 let t1 = CACurrentMediaTime()
-                guard let raw = base else { return }
+                guard let raw = base else {
+                    workerState.withLock { $0.inFlight = false }
+                    return
+                }
                 let lcdImg = Self.oriented(raw, pool: orientationCtx,
                                            rotation: rotation,
                                            flipH: flipH, flipV: flipV) ?? raw
@@ -209,20 +217,36 @@ final class FrameLoop {
                 let jpeg = pushToLCD ? encoder.encode(lcdImg) : nil
                 let t3 = CACurrentMediaTime()
                 let jpegKB = (jpeg?.count ?? 0) / 1024
-                if let jpeg {
-                    _ = driver.send(jpeg)
-                }
-                let t4 = CACurrentMediaTime()
                 let crtMs = activeRenderer.lastCRTMs
+
                 phaseTiming.withLock { t in
                     t.renderMs.append((t1 - t0) * 1000)
                     t.crtMs.append(crtMs)
                     t.orientMs.append((t2 - t1) * 1000)
                     t.jpegMs.append((t3 - t2) * 1000)
-                    t.hidMs.append((t4 - t3) * 1000)
-                    t.totalMs.append((t4 - t0) * 1000)
+                    t.totalMs.append((t3 - t0) * 1000)
                     t.jpegKB = jpegKB
                 }
+
+                if let jpeg {
+                    let canSend = hidSlot.withLock { s -> Bool in
+                        if s.inFlight { s.dropped += 1; return false }
+                        s.inFlight = true
+                        return true
+                    }
+                    if canSend {
+                        hidQueue.async {
+                            let h0 = CACurrentMediaTime()
+                            _ = driver.send(jpeg)
+                            let h1 = CACurrentMediaTime()
+                            phaseTiming.withLock { $0.hidMs.append((h1 - h0) * 1000) }
+                            hidSlot.withLock { $0.inFlight = false }
+                        }
+                    }
+                }
+
+                workerState.withLock { $0.inFlight = false }
+
                 if previewVisible {
                     Task { @MainActor in env?.updatePreview(image: raw) }
                 }
@@ -241,14 +265,17 @@ final class FrameLoop {
                     let mx = arr.max() ?? 0
                     return String(format: "avg=%.1f max=%.1f", avg, mx)
                 }
-                let s = "render(\(stats(t.renderMs))) crt(\(stats(t.crtMs))) orient(\(stats(t.orientMs))) jpeg(\(stats(t.jpegMs))) hid(\(stats(t.hidMs))) total(\(stats(t.totalMs))) n=\(t.totalMs.count) jpegKB=\(t.jpegKB)"
+                let s = "render(\(stats(t.renderMs))) crt(\(stats(t.crtMs))) orient(\(stats(t.orientMs))) jpeg(\(stats(t.jpegMs))) hid(\(stats(t.hidMs))) pipe(\(stats(t.totalMs))) n=\(t.totalMs.count) jpegKB=\(t.jpegKB)"
                 t.reset()
                 return s
             }
             let elapsed = Int(CACurrentMediaTime() - startTime)
             let h = elapsed / 3600, m = (elapsed % 3600) / 60, s = elapsed % 60
             let ts = String(format: "T+%02d:%02d:%02d", h, m, s)
-            logger.warning("[perf \(ts, privacy: .public)] \(phaseSnapshot, privacy: .public) | mem=\(usedMB)MB skip=\(self.skippedFrames)")
+            let hidDropped = self.hidSlot.withLock { s -> Int in
+                let d = s.dropped; s.dropped = 0; return d
+            }
+            logger.warning("[perf \(ts, privacy: .public)] \(phaseSnapshot, privacy: .public) | mem=\(usedMB)MB skip=\(self.skippedFrames) drop=\(hidDropped)")
             if usedMB > 1800 {
                 logger.warning("[perf] HIGH MEMORY: \(usedMB) MB")
             }

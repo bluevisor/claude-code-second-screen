@@ -201,10 +201,7 @@ final class AppEnvironment: ObservableObject {
     /// to read the toggle don't have to branch.
     let pushToLCD = true
 
-    /// At 15fps the frame interval is ~66ms, which leaves enough slack
-    /// for steady-state render + JPEG + HID while the coalescer drops
-    /// occasional slow HID spikes instead of building a stale backlog.
-    let targetFPS = 15
+    let targetFPS = 30
 
     // Live state surfaced to the UI.
     @Published private(set) var telemetry: Telemetry = .empty()

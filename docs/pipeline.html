@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NeoDashboard Render Pipeline</title>
+<style>
+:root {
+  --green: #29ff8c; --green-bg: #29ff8c14; --green-dim: #29ff8c44;
+  --green-mid: #29ff8c88; --cyan: #00d4ff; --amber: #ffb627;
+  --orange: #ff8c29; --red: #ff2a6d; --bg: #0a0a0a;
+  --card: #0d1a15; --border: #29ff8c22; --text: #c9ffe2;
+  --text-dim: #c9ffe266; --text-mid: #c9ffe2aa;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font-family: 'JetBrains Mono','SF Mono',monospace; padding: 32px 40px; }
+h1 { font-size: 13px; text-transform: uppercase; letter-spacing: 3px; color: var(--green); margin-bottom: 4px; }
+.sub { font-size: 11px; color: var(--text-dim); }
+.section { margin-bottom: 36px; }
+.section-head {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 2px;
+  color: var(--green-mid); margin-bottom: 14px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px;
+}
+
+/* Architecture */
+.arch { display: flex; align-items: center; gap: 0; flex-wrap: wrap; padding: 16px 0; }
+.arch-node {
+  border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px;
+  text-align: center; background: var(--card); min-width: 105px;
+  transition: all 0.2s; cursor: pointer; position: relative;
+}
+.arch-node:hover { border-color: var(--green); box-shadow: 0 0 20px #29ff8c15; transform: translateY(-2px); }
+.arch-node .a-icon { font-size: 20px; margin-bottom: 4px; }
+.arch-node .a-name { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; color: var(--green); margin-bottom: 2px; }
+.arch-node .a-time { font-size: 16px; font-weight: bold; }
+.arch-node .a-unit { font-size: 9px; color: var(--text-dim); }
+.arch-node .a-tip {
+  display: none; position: absolute; top: calc(100% + 8px); left: 50%;
+  transform: translateX(-50%); background: #0d1a15; border: 1px solid var(--green-dim);
+  border-radius: 6px; padding: 10px 14px; font-size: 9px; color: var(--text-mid);
+  line-height: 1.6; white-space: nowrap; z-index: 10; pointer-events: none;
+}
+.arch-node:hover .a-tip { display: block; }
+.arch-arrow { width: 28px; height: 1px; background: linear-gradient(90deg, transparent, var(--green-dim)); position: relative; margin: 0 2px; }
+.arch-arrow::after { content: '▸'; position: absolute; right: -6px; top: -8px; font-size: 12px; color: var(--green-dim); }
+.arch-fork { display: flex; flex-direction: column; align-items: center; margin: 0 4px; }
+.arch-fork-line { width: 1px; height: 18px; background: var(--amber); opacity: 0.4; }
+.arch-fork-label { font-size: 7px; color: var(--amber); letter-spacing: 1px; text-transform: uppercase; }
+.arch-queue-label {
+  font-size: 8px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px;
+  border: 1px dashed var(--border); border-radius: 4px; padding: 3px 8px; margin: 0 4px;
+}
+
+/* Toggle */
+.toggle-group { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.toggle-btn {
+  padding: 5px 12px; font-size: 10px; font-family: inherit; background: transparent;
+  color: var(--text-dim); border: none; cursor: pointer; text-transform: uppercase;
+  letter-spacing: 1px; transition: all 0.2s;
+}
+.toggle-btn.active { background: var(--green); color: var(--bg); }
+
+/* Gantt */
+.gantt-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; position: relative; }
+canvas#gantt { width: 100%; height: 150px; display: block; border-radius: 4px; }
+.gantt-legend { display: flex; gap: 14px; margin-top: 8px; font-size: 9px; color: var(--text-dim); flex-wrap: wrap; }
+.gantt-legend span { display: flex; align-items: center; gap: 4px; }
+.leg-dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.gantt-pause {
+  position: absolute; top: 14px; right: 14px; background: transparent;
+  border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px;
+  color: var(--text-dim); font-family: inherit; font-size: 9px; cursor: pointer;
+  text-transform: uppercase; letter-spacing: 1px;
+}
+.gantt-pause:hover { border-color: var(--green); color: var(--green); }
+
+/* Sliders */
+.sliders { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.slider-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+}
+.slider-row label { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; color: var(--green-mid); min-width: 55px; }
+.slider-row input[type="range"] {
+  flex: 1; -webkit-appearance: none; height: 4px; background: var(--green-dim);
+  border-radius: 2px; outline: none;
+}
+.slider-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--green); cursor: pointer; border: 2px solid var(--bg);
+}
+.slider-row .s-val { font-size: 12px; font-weight: bold; min-width: 50px; text-align: right; }
+
+/* Stats */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+.stat {
+  border: 1px solid var(--border); background: var(--card); border-radius: 6px;
+  padding: 12px; text-align: center; transition: border-color 0.3s;
+}
+.stat.ok { border-color: var(--green); }
+.stat.warn { border-color: var(--amber); }
+.stat.bad { border-color: var(--red); }
+.stat .s-label { font-size: 8px; text-transform: uppercase; letter-spacing: 1px; color: var(--green-mid); margin-bottom: 2px; }
+.stat .s-value { font-size: 20px; font-weight: bold; }
+.stat .s-unit { font-size: 9px; color: var(--text-dim); }
+.stat .s-sub { font-size: 9px; color: var(--text-dim); margin-top: 2px; }
+
+/* History */
+.history { display: flex; gap: 0; }
+.history-item {
+  flex: 1; padding: 14px; border: 1px solid var(--border); text-align: center;
+  position: relative; transition: all 0.2s; cursor: default;
+}
+.history-item:first-child { border-radius: 6px 0 0 6px; }
+.history-item:last-child { border-radius: 0 6px 6px 0; }
+.history-item:hover { background: var(--green-bg); }
+.history-item.current { border-color: var(--green); background: var(--green-bg); }
+.history-item .h-date { font-size: 8px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin-bottom: 6px; }
+.history-item .h-total { font-size: 22px; font-weight: bold; margin-bottom: 2px; }
+.history-item .h-fps { font-size: 11px; font-weight: bold; }
+.history-item .h-detail { font-size: 8px; color: var(--text-dim); margin-top: 6px; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<header class="section">
+  <h1>▸ NeoDashboard Render Pipeline</h1>
+  <p class="sub">30 fps · 1280×480 · USB HID · Trofeo Vision LCD · pipelined render∥HID</p>
+</header>
+
+<div class="section">
+  <div class="section-head">Architecture</div>
+  <div class="arch" id="arch"></div>
+</div>
+
+<div class="section">
+  <div class="section-head">
+    Pipeline Timeline
+    <div class="toggle-group">
+      <button class="toggle-btn" data-mode="serial" onclick="setMode('serial')">Serial</button>
+      <button class="toggle-btn active" data-mode="pipelined" onclick="setMode('pipelined')">Pipelined</button>
+    </div>
+  </div>
+  <div class="gantt-wrap">
+    <canvas id="gantt"></canvas>
+    <button class="gantt-pause" id="pauseBtn" onclick="togglePause()">pause</button>
+    <div class="gantt-legend">
+      <span><span class="leg-dot" style="background:#29ff8c"></span> Render</span>
+      <span><span class="leg-dot" style="background:#00d4ff"></span> Orient</span>
+      <span><span class="leg-dot" style="background:#ffb627"></span> JPEG</span>
+      <span><span class="leg-dot" style="background:#ff8c29"></span> HID Send</span>
+      <span><span class="leg-dot" style="background:transparent;border:1px dashed #ff2a6d"></span> Budget</span>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-head">Phase Timing</div>
+  <div class="sliders" id="sliders"></div>
+</div>
+
+<div class="section">
+  <div class="section-head">Computed</div>
+  <div class="stats" id="stats"></div>
+</div>
+
+<div class="section">
+  <div class="section-head">Optimization History</div>
+  <div class="history" id="history"></div>
+</div>
+
+<script>
+const P = { render: 13, orient: 0.6, jpeg: 1.2, hid: 20, fps: 30 };
+let mode = 'pipelined';
+let paused = false;
+let animId = null;
+let modeT = 1; // 0=serial, 1=pipelined (animated)
+let gantt;
+
+// ── Architecture ──
+const phases = [
+  { id:'render', icon:'🎨', name:'Render', key:'render',
+    tip:'CGContext drawing\nRain glyphs ~3ms\nCTLine text cache ~5ms\nCRT pixel shift ~3ms\nPanel chrome: cached' },
+  { id:'orient', icon:'🔄', name:'Orient', key:'orient',
+    tip:'Rotation + flip\nPooled CGContext reuse\nNo-op when 0°' },
+  { id:'jpeg', icon:'📦', name:'JPEG', key:'jpeg',
+    tip:'ImageIO encode\nq=0.25 → ~44KB\nFF D8 validated' },
+  { id:'hid', icon:'⚡', name:'HID Send', key:'hid',
+    tip:'~86 × 512B SetReport\nDedicated hidQueue\nSingle-slot drop buffer\nSynchronous kernel calls' },
+];
+
+function buildArch() {
+  const el = document.getElementById('arch');
+  let html = '<span class="arch-queue-label">workQueue</span>';
+  phases.forEach((p, i) => {
+    if (i === 3) {
+      html += '<div class="arch-fork"><div class="arch-fork-label">async</div><div class="arch-fork-line"></div></div>';
+      html += '<span class="arch-queue-label">hidQueue</span>';
+    } else if (i > 0) {
+      html += '<div class="arch-arrow"></div>';
+    }
+    const v = P[p.key];
+    html += `<div class="arch-node" id="an-${p.id}">
+      <div class="a-icon">${p.icon}</div>
+      <div class="a-name">${p.name}</div>
+      <div class="a-time">${v<1?v.toFixed(1):Math.round(v)}<span class="a-unit">ms</span></div>
+      <div class="a-tip">${p.tip.replace(/\n/g,'<br>')}</div>
+    </div>`;
+  });
+  el.innerHTML = html;
+}
+
+// ── Sliders ──
+const sliders = [
+  { key:'render', label:'Render', min:2, max:40, step:0.5 },
+  { key:'orient', label:'Orient', min:0, max:5, step:0.1 },
+  { key:'jpeg',   label:'JPEG',   min:0.2, max:10, step:0.1 },
+  { key:'hid',    label:'HID',    min:5, max:50, step:0.5 },
+  { key:'fps',    label:'Target', min:10, max:60, step:1 },
+];
+
+function buildSliders() {
+  const el = document.getElementById('sliders');
+  el.innerHTML = sliders.map(s => {
+    const v = P[s.key], u = s.key==='fps'?'fps':'ms';
+    return `<div class="slider-row">
+      <label>${s.label}</label>
+      <input type="range" min="${s.min}" max="${s.max}" step="${s.step}" value="${v}"
+        oninput="P['${s.key}']=+this.value;refresh()">
+      <span class="s-val" id="sv-${s.key}">${fmt(v)}${u}</span>
+    </div>`;
+  }).join('');
+}
+
+function fmt(v) { return v<1?v.toFixed(1):(v%1?v.toFixed(1):v); }
+
+// ── Stats ──
+function calc() {
+  const pipe = P.render + P.orient + P.jpeg;
+  const serial = pipe + P.hid;
+  const pipelined = Math.max(pipe, P.hid);
+  const interval = mode==='serial' ? serial : pipelined;
+  const maxFPS = 1000/interval;
+  const effFPS = Math.min(P.fps, maxFPS);
+  const budget = 1000/P.fps;
+  const headroom = Math.max(0, (budget - interval)/budget*100);
+  const ok = interval <= budget;
+  const neck = mode==='pipelined' ? (pipe>P.hid?'Render':'HID') : 'Serial';
+  return { pipe, serial, pipelined, interval, maxFPS, effFPS, budget, headroom, ok, neck };
+}
+
+function buildStats() {
+  const s = calc();
+  const fc = s.ok?'var(--green)':'var(--red)';
+  const hc = s.headroom>20?'var(--green)':s.headroom>0?'var(--amber)':'var(--red)';
+  document.getElementById('stats').innerHTML = `
+    <div class="stat ${s.ok?'ok':'bad'}">
+      <div class="s-label">Effective FPS</div>
+      <div class="s-value" style="color:${fc}">${s.effFPS.toFixed(1)}</div>
+      <div class="s-sub">max ${s.maxFPS.toFixed(0)} · target ${P.fps}</div>
+    </div>
+    <div class="stat">
+      <div class="s-label">Pipeline</div>
+      <div class="s-value">${s.pipe.toFixed(1)}<span class="s-unit">ms</span></div>
+      <div class="s-sub">render + orient + jpeg</div>
+    </div>
+    <div class="stat">
+      <div class="s-label">Interval</div>
+      <div class="s-value">${s.interval.toFixed(1)}<span class="s-unit">ms</span></div>
+      <div class="s-sub">${mode==='pipelined'?'max(pipe, hid)':'pipe + hid'}</div>
+    </div>
+    <div class="stat">
+      <div class="s-label">Budget</div>
+      <div class="s-value">${s.budget.toFixed(1)}<span class="s-unit">ms</span></div>
+      <div class="s-sub">${P.fps}fps frame window</div>
+    </div>
+    <div class="stat">
+      <div class="s-label">Headroom</div>
+      <div class="s-value" style="color:${hc}">${s.headroom.toFixed(0)}<span class="s-unit">%</span></div>
+      <div class="s-sub">${s.ok?'within budget':'OVER BUDGET'}</div>
+    </div>
+    <div class="stat">
+      <div class="s-label">Bottleneck</div>
+      <div class="s-value" style="font-size:14px">${s.neck}</div>
+      <div class="s-sub">${Math.ceil(44*1024/512)} reports/frame</div>
+    </div>
+  `;
+}
+
+// ── History ──
+function buildHistory() {
+  const items = [
+    { date:'May 26 AM', total:'87ms', fps:'~6 fps', detail:'CIFilter CRT<br>q=0.85 (248KB)<br>160 kernel calls', color:'var(--red)' },
+    { date:'May 26 PM', total:'38ms', fps:'~25 fps', detail:'vImage CRT<br>q=0.25 (40KB)<br>CTLine cache', color:'var(--amber)' },
+    { date:'May 27 AM', total:'33ms', fps:'~30 fps', detail:'Telemetry async<br>Skip unchanged<br>Serial pipeline', color:'var(--amber)' },
+    { date:'May 27 Now', total:'15ms', fps:'30 fps', detail:'Pipelined HID<br>pipe ∥ hid overlap<br>0 drops, 0 skips', color:'var(--green)', current:true },
+  ];
+  document.getElementById('history').innerHTML = items.map(h =>
+    `<div class="history-item ${h.current?'current':''}">
+      <div class="h-date">${h.date}</div>
+      <div class="h-total" style="color:${h.color}">${h.total}</div>
+      <div class="h-fps" style="color:${h.color}">${h.fps}</div>
+      <div class="h-detail">${h.detail}</div>
+    </div>`
+  ).join('');
+}
+
+// ── Gantt Chart ──
+const C = { render:'#29ff8c', orient:'#00d4ff', jpeg:'#ffb627', hid:'#ff8c29',
+            budget:'#ff2a6d', grid:'#29ff8c18', text:'#c9ffe266', lane:'#29ff8c0a' };
+
+function initGantt() {
+  const cv = document.getElementById('gantt');
+  const dpr = devicePixelRatio || 1;
+  const r = cv.getBoundingClientRect();
+  cv.width = r.width * dpr;
+  cv.height = 150 * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr, dpr);
+  return { cv, ctx, w: r.width, h: 150 };
+}
+
+function block(ctx, x, y, w, h, color, cL, cR) {
+  w = Math.max(w, 2);
+  const l = Math.max(x, cL), r = Math.min(x + w, cR);
+  if (r <= l) return;
+  ctx.fillStyle = color + '33';
+  ctx.fillRect(l, y+1, r-l, h-2);
+  ctx.fillStyle = color + '77';
+  ctx.fillRect(l, y+1, r-l, 1);
+  ctx.fillRect(l, y+h-2, r-l, 1);
+  if (x >= cL) { ctx.fillStyle = color; ctx.fillRect(x, y+1, 1.5, h-2); }
+}
+
+function drawGantt(ts) {
+  if (!gantt) return;
+  const { ctx, w, h } = gantt;
+  ctx.clearRect(0, 0, w, h);
+
+  // Animate serial↔pipelined transition
+  const tgt = mode === 'pipelined' ? 1 : 0;
+  modeT += (tgt - modeT) * 0.08;
+  if (Math.abs(modeT - tgt) < 0.001) modeT = tgt;
+
+  const s = calc();
+  const pipe = s.pipe;
+  const fi_s = s.serial, fi_p = s.pipelined;
+  const fi = fi_s + (fi_p - fi_s) * modeT;
+
+  const visMs = Math.max(120, fi * 5);
+  const cX = 76, cW = w - cX;
+  const px = cW / visMs;
+
+  const scrollSpeed = fi * px / 1400;
+  const scroll = paused ? (gantt.frozenScroll || 0) : ts * scrollSpeed;
+  if (paused && !gantt.frozenScroll) gantt.frozenScroll = scroll;
+  if (!paused) gantt.frozenScroll = null;
+
+  const lH = 28, gap = 10;
+  const workY = 30;
+  const hidFullY = workY + lH + gap;
+  const hidY = workY + (hidFullY - workY) * modeT;
+
+  // Lane backgrounds
+  ctx.fillStyle = C.lane;
+  ctx.fillRect(cX, workY, cW, lH);
+  if (modeT > 0.01) {
+    ctx.globalAlpha = modeT;
+    ctx.fillRect(cX, hidY, cW, lH);
+    ctx.globalAlpha = 1;
+  }
+
+  // Grid + time ruler
+  ctx.font = '8px "JetBrains Mono",monospace';
+  ctx.textBaseline = 'top';
+  const gridStep = visMs < 200 ? 5 : visMs < 400 ? 10 : 20;
+  for (let t = 0; t <= visMs; t += gridStep) {
+    const x = cX + t * px;
+    ctx.fillStyle = C.grid;
+    ctx.fillRect(x, workY - 14, 1, h);
+    ctx.fillStyle = C.text;
+    ctx.fillText(t + 'ms', x + 2, workY - 13);
+  }
+
+  // Frame blocks
+  const fpx = fi * px;
+  const first = Math.floor(scroll / fpx) - 1;
+  const last = first + Math.ceil(cW / fpx) + 3;
+
+  for (let i = first; i <= last; i++) {
+    const bx = cX + i * fpx - scroll;
+
+    // Work queue: render → orient → jpeg
+    let x = bx;
+    block(ctx, x, workY, P.render*px, lH, C.render, cX, cX+cW);
+    x += P.render * px;
+    block(ctx, x, workY, P.orient*px, lH, C.orient, cX, cX+cW);
+    x += P.orient * px;
+    block(ctx, x, workY, P.jpeg*px, lH, C.jpeg, cX, cX+cW);
+
+    // HID — position interpolated between work lane (serial) and hid lane (pipelined)
+    const hx = bx + pipe * px;
+    block(ctx, hx, hidY, P.hid*px, lH, C.hid, cX, cX+cW);
+
+    // Frame label
+    const lx = bx + 4;
+    if (lx > cX && lx < cX + cW - 20) {
+      ctx.fillStyle = '#0a0a0acc';
+      ctx.font = 'bold 8px "JetBrains Mono",monospace';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('F' + ((i % 10 + 10) % 10), lx, workY + lH/2);
+    }
+  }
+
+  // Budget dashed lines
+  const budgetPx = s.budget * px;
+  if (budgetPx > 20) {
+    ctx.save();
+    ctx.strokeStyle = C.budget + '55';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    const bFirst = Math.floor(scroll / budgetPx) - 1;
+    const bLast = bFirst + Math.ceil(cW / budgetPx) + 3;
+    for (let i = bFirst; i <= bLast; i++) {
+      const bx = cX + i * budgetPx - scroll;
+      if (bx > cX && bx < cX + cW) {
+        ctx.beginPath();
+        ctx.moveTo(bx, workY - 2);
+        ctx.lineTo(bx, hidY + lH + 2);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  // Left clip + lane labels
+  ctx.fillStyle = '#0d1a15';
+  ctx.fillRect(0, 0, cX, h);
+  ctx.font = '9px "JetBrains Mono",monospace';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = C.text;
+  ctx.fillText('workQ', 6, workY + lH/2);
+  if (modeT > 0.05) {
+    ctx.globalAlpha = modeT;
+    ctx.fillText('hidQ', 6, hidY + lH/2);
+    ctx.globalAlpha = 1;
+  }
+
+  // FPS indicator
+  ctx.font = 'bold 10px "JetBrains Mono",monospace';
+  ctx.textBaseline = 'bottom';
+  ctx.textAlign = 'right';
+  const fpsLabel = `${s.effFPS.toFixed(0)} fps`;
+  ctx.fillStyle = s.ok ? C.render : C.budget;
+  ctx.fillText(fpsLabel, w - 8, workY - 4);
+  ctx.textAlign = 'left';
+
+  animId = requestAnimationFrame(drawGantt);
+}
+
+function togglePause() {
+  paused = !paused;
+  document.getElementById('pauseBtn').textContent = paused ? 'play' : 'pause';
+  if (!paused) {
+    gantt.frozenScroll = null;
+    animId = requestAnimationFrame(drawGantt);
+  }
+}
+
+// ── Mode toggle ──
+function setMode(m) {
+  mode = m;
+  document.querySelectorAll('.toggle-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
+  refresh();
+}
+
+// ── Refresh ──
+function refresh() {
+  phases.forEach(p => {
+    const n = document.getElementById('an-' + p.id);
+    if (!n) return;
+    const v = P[p.key];
+    n.querySelector('.a-time').innerHTML = (v<1?v.toFixed(1):Math.round(v)) + '<span class="a-unit">ms</span>';
+  });
+  sliders.forEach(s => {
+    const u = s.key==='fps'?'fps':'ms';
+    const el = document.getElementById('sv-' + s.key);
+    if (el) el.textContent = fmt(P[s.key]) + u;
+  });
+  buildStats();
+}
+
+// ── Init ──
+function init() {
+  buildArch();
+  buildSliders();
+  buildStats();
+  buildHistory();
+  gantt = initGantt();
+  animId = requestAnimationFrame(drawGantt);
+}
+
+window.addEventListener('resize', () => {
+  cancelAnimationFrame(animId);
+  gantt = initGantt();
+  animId = requestAnimationFrame(drawGantt);
+});
+
+init();
+</script>
+</body>
+</html>
