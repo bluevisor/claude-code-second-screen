@@ -65,7 +65,7 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
             renderCtx = CGContext(
                 data: nil,
                 width: Int(size.width), height: Int(size.height),
-                bitsPerComponent: 8, bytesPerRow: 0,
+                bitsPerComponent: 8, bytesPerRow: Int(size.width) * 4,
                 space: colorSpace,
                 bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
                     | CGBitmapInfo.byteOrder32Little.rawValue
@@ -73,7 +73,6 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
         }
         guard let ctx = renderCtx else { return nil }
         ctx.saveGState()
-        defer { ctx.restoreGState() }
         ctx.translateBy(x: 0, y: size.height)
         ctx.scaleBy(x: 1, y: -1)
 
@@ -110,8 +109,9 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
             ctx.fill(CGRect(origin: .zero, size: size))
         }
 
-        guard let raw = ctx.makeImage() else { return nil }
-        return crt.process(raw) ?? raw
+        ctx.restoreGState()
+        crt.applyInPlace(ctx: ctx)
+        return ctx.makeImage()
     }
 
     /// Returns the cached background layer, rebuilding only when the

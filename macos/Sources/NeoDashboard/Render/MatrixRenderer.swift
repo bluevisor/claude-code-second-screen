@@ -164,10 +164,9 @@ final class MatrixRenderer: @unchecked Sendable {
         // old post-process step that wrapped the final image.
         applyFade(into: ctx, alpha: blackAlpha)
 
-        let raw = ctx.makeImage()
         ctx.restoreGState()
-        guard let raw else { return nil }
-        return crt.process(raw) ?? raw
+        crt.applyInPlace(ctx: ctx)
+        return ctx.makeImage()
     }
 
     private func ensureRenderContext() -> CGContext? {
@@ -177,7 +176,7 @@ final class MatrixRenderer: @unchecked Sendable {
             width: Int(size.width),
             height: Int(size.height),
             bitsPerComponent: 8,
-            bytesPerRow: 0,
+            bytesPerRow: Int(size.width) * 4,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
                 | CGBitmapInfo.byteOrder32Little.rawValue
@@ -1457,30 +1456,35 @@ final class MatrixRenderer: @unchecked Sendable {
         MatrixTheme.metrics(of: font).capHeight
     }
 
-    /// Single-slot CTLine cache. Many text sites measure first then
-    /// draw the same string immediately — the second call now hits the
-    /// cache and skips the dict/NSAttributedString/CTLine creation.
-    /// Heterogeneous draw sequences just bounce the slot; that's fine
-    /// because each line is still built only once (vs. previously
-    /// twice — once for measure, once for draw).
-    private var ctLineCache: (
-        string: String, font: NSFont, color: NSColor, line: CTLine
-    )?
+    /// LRU CTLine cache. Keyed by (string, font identity, color identity).
+    /// Most dashboard labels ("▸ PROMPT", "▸ MODEL", "CONTEXT", etc.)
+    /// repeat every frame — the cache turns ~40 CTLine+NSAttributedString
+    /// allocations per frame into ~5-10 misses (dynamic values only).
+    private var ctLineSlots: [(key: UInt64, line: CTLine)] = []
+    private let ctLineCacheSize = 24
 
-    /// Build (or fetch from the single-slot cache) a CTLine with the
-    /// pooled attribute dict. Both `drawText` and `stringWidth` go
-    /// through here so measure-then-draw of the same string with the
-    /// same (font, color) only constructs the line once.
     private func ctLine(_ s: String, font: NSFont, color: NSColor) -> CTLine {
-        if let cached = ctLineCache,
-           cached.font === font, cached.color === color,
-           cached.string == s {
-            return cached.line
+        var h = Hasher()
+        h.combine(s)
+        h.combine(ObjectIdentifier(font))
+        h.combine(ObjectIdentifier(color))
+        let key = UInt64(bitPattern: Int64(h.finalize()))
+
+        if let idx = ctLineSlots.firstIndex(where: { $0.key == key }) {
+            let hit = ctLineSlots[idx]
+            if idx > 0 {
+                ctLineSlots.remove(at: idx)
+                ctLineSlots.insert(hit, at: 0)
+            }
+            return hit.line
         }
         let attrs = MatrixTheme.attributes(font: font, color: color)
         let line = CTLineCreateWithAttributedString(
             NSAttributedString(string: s, attributes: attrs))
-        ctLineCache = (s, font, color, line)
+        ctLineSlots.insert((key, line), at: 0)
+        if ctLineSlots.count > ctLineCacheSize {
+            ctLineSlots.removeLast()
+        }
         return line
     }
 

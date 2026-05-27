@@ -1,104 +1,59 @@
-// Final-pass CRT effect — red/blue chromatic shift on a Core Image
-// pipeline. Cheap to run at 30 fps because the CIContext is reused.
+// CRT chromatic aberration — shifts red channel right and blue channel
+// left by `chromaticShift` pixels in-place on an existing CGContext's
+// pixel buffer. No image copy, no Core Image, no Metal.
 
 import CoreGraphics
-import CoreImage
-import CoreImage.CIFilterBuiltins
 import Foundation
 import QuartzCore
 
 final class CRTPostProcessor {
-    private let context: CIContext
-    /// Pixels of RGB separation per channel direction at the canvas edges.
-    /// Kept low — 1.5 reads as a believable CRT seam, anything north of ~3
-    /// starts to look like a misaligned colour separation.
-    var chromaticShift: CGFloat = 1.5
-
-    // Pre-built CIFilter instances reused across every frame. The
-    // previous implementation rebuilt 5 filter trees per process() call
-    // (3 ColorMatrix + 2 AdditionCompositing) plus 6 CIVector
-    // allocations for the channel masks. Holding the filters here
-    // collapses that to setting `inputImage` per call.
-    private let redChannel: CIFilter & CIColorMatrix
-    private let greenChannel: CIFilter & CIColorMatrix
-    private let blueChannel: CIFilter & CIColorMatrix
-    private let combineRG: CIFilter & CICompositeOperation
-    private let combineRGB: CIFilter & CICompositeOperation
-    // The shift transforms are scalar — applied via `.transformed(by:)`
-    // on the channel filter output, which is a lightweight CIImage op.
-    private var redShift = CGAffineTransform.identity
-    private var blueShift = CGAffineTransform.identity
-    /// Counter for periodic CIContext.clearCaches() — the Metal
-    /// intermediate-texture cache grows monotonically across
-    /// createCGImage calls and is documented as unbounded; without a
-    /// periodic flush it pins hundreds of MB of GPU memory over hours.
-    /// Flush every ~30 s at 30 fps.
-    private var framesSinceFlush = 0
-    private let framesPerFlush = 150
-    /// Last process() wall-clock duration in milliseconds.
+    var chromaticShift: Int = 2
     private(set) var lastProcessMs: Double = 0
 
-    init() {
-        // Skip the software fallback — we ship to Metal-capable Macs only.
-        self.context = CIContext(options: [.useSoftwareRenderer: false])
-
-        let zero = CIVector(x: 0, y: 0, z: 0, w: 0)
-        let r = CIVector(x: 1, y: 0, z: 0, w: 0)
-        let g = CIVector(x: 0, y: 1, z: 0, w: 0)
-        let b = CIVector(x: 0, y: 0, z: 1, w: 0)
-
-        let red = CIFilter.colorMatrix()
-        red.rVector = r; red.gVector = zero; red.bVector = zero
-        self.redChannel = red
-
-        let green = CIFilter.colorMatrix()
-        green.rVector = zero; green.gVector = g; green.bVector = zero
-        self.greenChannel = green
-
-        let blue = CIFilter.colorMatrix()
-        blue.rVector = zero; blue.gVector = zero; blue.bVector = b
-        self.blueChannel = blue
-
-        self.combineRG = CIFilter.additionCompositing()
-        self.combineRGB = CIFilter.additionCompositing()
-
-        self.redShift = CGAffineTransform(translationX: chromaticShift, y: 0)
-        self.blueShift = CGAffineTransform(translationX: -chromaticShift, y: 0)
-    }
-
-    /// Returns a new CGImage with CRT post-effects applied. Falls back to
-    /// the input on any filter setup error.
-    func process(_ image: CGImage) -> CGImage? {
+    /// Apply chromatic shift in-place on `ctx`'s pixel buffer. Call this
+    /// BEFORE `ctx.makeImage()` — the shift modifies the backing store
+    /// directly so the subsequent makeImage captures the result with
+    /// zero copy. The context must use BGRA byte order (byteOrder32Little
+    /// + premultipliedFirst).
+    func applyInPlace(ctx: CGContext) {
         let t0 = CACurrentMediaTime()
-        let input = CIImage(cgImage: image)
-        let extent = input.extent
-
-        redChannel.inputImage = input
-        greenChannel.inputImage = input
-        blueChannel.inputImage = input
-        guard
-            let redIsolated = redChannel.outputImage,
-            let greenIsolated = greenChannel.outputImage,
-            let blueIsolated = blueChannel.outputImage
-        else { return image }
-
-        let redShifted = redIsolated.transformed(by: redShift)
-        let blueShifted = blueIsolated.transformed(by: blueShift)
-
-        combineRG.inputImage = greenIsolated
-        combineRG.backgroundImage = redShifted
-        guard let rg = combineRG.outputImage else { return image }
-        combineRGB.inputImage = rg
-        combineRGB.backgroundImage = blueShifted
-        guard let combined = combineRGB.outputImage else { return image }
-
-        let result = context.createCGImage(combined.cropped(to: extent), from: extent) ?? image
-        lastProcessMs = (CACurrentMediaTime() - t0) * 1000
-        framesSinceFlush += 1
-        if framesSinceFlush >= framesPerFlush {
-            framesSinceFlush = 0
-            context.clearCaches()
+        guard let ptr = ctx.data?.assumingMemoryBound(to: UInt8.self) else {
+            lastProcessMs = 0
+            return
         }
-        return result
+        let w = ctx.width
+        let h = ctx.height
+        let shift = chromaticShift
+        guard w > shift * 2 else { return }
+        let bpr = ctx.bytesPerRow
+
+        // BGRA: byte 0=B, 1=G, 2=R, 3=A
+        for y in 0..<h {
+            let row = ptr.advanced(by: y * bpr)
+
+            // Red (offset 2): shift right — copy right-to-left
+            var x = w - 1
+            while x >= shift {
+                row[x &* 4 &+ 2] = row[(x &- shift) &* 4 &+ 2]
+                x &-= 1
+            }
+            while x >= 0 {
+                row[x &* 4 &+ 2] = 0
+                x &-= 1
+            }
+
+            // Blue (offset 0): shift left — copy left-to-right
+            x = 0
+            let limit = w &- shift
+            while x < limit {
+                row[x &* 4] = row[(x &+ shift) &* 4]
+                x &+= 1
+            }
+            while x < w {
+                row[x &* 4] = 0
+                x &+= 1
+            }
+        }
+        lastProcessMs = (CACurrentMediaTime() - t0) * 1000
     }
 }

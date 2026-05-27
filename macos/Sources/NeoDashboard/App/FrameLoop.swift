@@ -29,6 +29,8 @@ final class FrameLoop {
     private var frameTimer: Timer?
     private let workQueue = DispatchQueue(label: "tech.bluevisor.NeoDashboard.render",
                                           qos: .userInteractive)
+    private let telQueue = DispatchQueue(label: "tech.bluevisor.NeoDashboard.telemetry",
+                                          qos: .utility)
     /// Cross-thread state for the worker queue. `inFlight` coalesces frame
     /// ticks so the wall clock can't lag behind a backed-up HID pipeline.
     /// LCD connection state is owned by the driver now (`startMonitoring`)
@@ -122,11 +124,17 @@ final class FrameLoop {
         // nothing has changed, so the extra polling is essentially free —
         // and it lets fast tools (Read, Glob, …) actually appear on the
         // dashboard before the user's tool-result event closes the window.
+        let telQ = self.telQueue
         let tel = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                let tel = self.env?.source.tick() ?? .empty()
-                self.env?.updateTelemetry(tel)
+            guard let self, let env = self.env else { return }
+            let source = env.source
+            telQ.async {
+                autoreleasepool {
+                    let result = source.tick()
+                    Task { @MainActor in
+                        env.updateTelemetry(result)
+                    }
+                }
             }
         }
         RunLoop.main.add(tel, forMode: .common)
