@@ -105,8 +105,6 @@ hairline grid, animated scan-highlight on the activity bar, CRT
 interlacing + subtle vignette, blinking cap-aligned caret next to the
 status verb.
 
-![Matrix theme — demo mode](docs/screenshot-matrix-demo.jpg)
-
 ## Architecture
 
 ```
