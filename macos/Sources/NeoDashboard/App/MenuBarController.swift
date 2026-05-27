@@ -38,7 +38,7 @@ final class MenuBarController: NSObject {
         let host = NSHostingController(
             rootView: MenuBarContent()
                 .environmentObject(env)
-                .frame(width: 320)
+                .frame(width: 180)
         )
         host.sizingOptions = [.preferredContentSize, .intrinsicContentSize]
         let p = NSPopover()
@@ -49,15 +49,11 @@ final class MenuBarController: NSObject {
     }
 
     private func statusImage() -> NSImage? {
-        let names = ["rectangle.3.group", "display", "desktopcomputer"]
-        for name in names {
-            guard let image = NSImage(systemSymbolName: name,
-                                      accessibilityDescription: "NeoDashboard") else { continue }
-            image.isTemplate = true
-            image.size = NSSize(width: 18, height: 18)
-            return image
-        }
-        return nil
+        guard let image = NSImage(systemSymbolName: "rectangle",
+                                   accessibilityDescription: "NeoDashboard") else { return nil }
+        image.isTemplate = true
+        image.size = NSSize(width: 18, height: 18)
+        return image
     }
 
     @objc private func togglePopover(_ sender: Any?) {

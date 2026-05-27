@@ -1,7 +1,3 @@
-// Menu bar popover — the only chrome the app exposes besides the live
-// preview window. Apple HIG layout: header / live status / quick controls
-// / footer actions. Settings scene is intentionally not used.
-
 import AppKit
 import SwiftUI
 
@@ -13,25 +9,18 @@ struct MenuBarContent: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider().padding(.vertical, 8)
-            statusBlock
-            Divider().padding(.vertical, 8)
-            controls
-            Divider().padding(.vertical, 8)
-            footer
+            buttons
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .frame(width: 320)
+        .frame(width: 180)
     }
-
-    // MARK: - Header
 
     private var header: some View {
         HStack(alignment: .center, spacing: 10) {
             Circle()
-                .fill(statusColor)
-                .frame(width: 10, height: 10)
-                .overlay(Circle().stroke(.white.opacity(0.15), lineWidth: 1))
+                .fill(lcdColor)
+                .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
                 Text("NeoDashboard")
                     .font(.headline)
@@ -40,140 +29,68 @@ struct MenuBarContent: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Text(env.telemetry.quota.plan)
-                .font(.caption2.weight(.heavy))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Color.green.opacity(0.18), in: Capsule())
-                .foregroundStyle(.green)
         }
     }
 
-    // MARK: - Live status block
-
-    private var statusBlock: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text(env.telemetry.agent.kind.uppercased().replacingOccurrences(of: "-", with: " "))
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text(statusLabel)
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(statusColor)
+    private var buttons: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            MenuRow(title: "Preview", icon: "rectangle.on.rectangle") {
+                showPreview()
             }
-            Text(env.telemetry.agent.currentTask.isEmpty
-                 ? "—"
-                 : env.telemetry.agent.currentTask)
-                .font(.callout)
-                .lineLimit(3)
-                .truncationMode(.tail)
-                .foregroundStyle(.primary)
-            HStack(spacing: 10) {
-                Label(env.telemetry.model.name, systemImage: "cpu")
-                    .labelStyle(.titleAndIcon)
-                Text("v\(env.telemetry.model.version)")
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Text("T\(env.telemetry.agent.turn) · \(env.telemetry.agent.filesRead)R/\(env.telemetry.agent.filesEdited)W")
-                    .foregroundStyle(.secondary)
+            Divider().padding(.vertical, 4)
+            MenuRow(title: "Quit", icon: "power") {
+                NSApp.terminate(nil)
             }
-            .font(.caption)
+            .keyboardShortcut("q")
         }
     }
 
-    // MARK: - Controls
-
-    private var controls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            themeRow
+    private func showPreview() {
+        openWindow(id: "preview")
+        NSApp.activate(ignoringOtherApps: true)
+        for w in NSApp.windows where w.title.contains("Live Preview") {
+            w.makeKeyAndOrderFront(nil)
         }
     }
 
-    /// Theme picker — the single most-used control. Source + display
-    /// tuning live in the preview window's gear popover now.
-    private var themeRow: some View {
-        HStack(spacing: 8) {
-            Text("Theme")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 56, alignment: .leading)
-            Menu {
-                ForEach(AppEnvironment.RenderMode.allCases) { m in
-                    Button {
-                        env.mode = m
-                        env.loop?.reconfigure()
-                    } label: {
-                        Label(m.rawValue, systemImage: themeSymbol(m))
-                    }
-                }
-            } label: {
-                Label(env.mode.rawValue, systemImage: themeSymbol(env.mode))
-                    .font(.callout)
-            }
-            .menuStyle(.borderlessButton)
-        }
-    }
-
-    private func themeSymbol(_ mode: AppEnvironment.RenderMode) -> String {
-        switch mode {
-        case .matrixDashboard: return "terminal"
-        case .cozy: return "leaf"
-        case .wowAlliance: return "shield.lefthalf.filled"
-        case .wowHorde: return "flame"
-        case .animalCrossing: return "tree"
-        case .dragonball: return "circle.hexagongrid"
-        }
-    }
-
-    // MARK: - Footer
-
-    private var footer: some View {
-        HStack {
-            Button {
-                openWindow(id: "preview")
-                NSApp.activate(ignoringOtherApps: true)
-                for w in NSApp.windows where w.title.contains("Live Preview") {
-                    w.makeKeyAndOrderFront(nil)
-                }
-            } label: {
-                Label("Show Preview", systemImage: "rectangle.on.rectangle")
-            }
-            Spacer()
-            Button("Quit") { NSApp.terminate(nil) }
-                .keyboardShortcut("q")
-        }
-        .controlSize(.small)
-    }
-
-    // MARK: - Derived
-
-    private var statusColor: Color {
-        switch env.telemetry.agent.status {
+    private var lcdColor: Color {
+        switch env.lcdStatus {
+        case .ready: return .green
+        case .connecting: return .orange
         case .error: return .red
-        case .idle:  return .orange
-        default:     return .green
-        }
-    }
-
-    private var statusLabel: String {
-        switch env.telemetry.agent.status {
-        case .error: return "ERROR"
-        case .idle: return "IDLE"
-        case .waiting: return "WAITING"
-        case .processing: return "PROCESSING"
-        case .thinking: return "THINKING"
-        case .tool: return env.telemetry.agent.currentTool ?? "TOOL"
-        case .writing: return "WRITING"
+        case .disconnected: return .gray
         }
     }
 
     private var lcdSummary: String {
         switch env.lcdStatus {
-        case .disconnected: return "LCD: disconnected"
-        case .connecting:   return "LCD: connecting…"
-        case .ready(let w, let h): return "LCD: \(w)×\(h)"
-        case .error(let msg): return "LCD: \(msg)"
+        case .disconnected: return "LCD disconnected"
+        case .connecting:   return "LCD connecting…"
+        case .ready(let w, let h): return "LCD \(w)×\(h) connected"
+        case .error(let msg): return "LCD error: \(msg)"
         }
+    }
+}
+
+private struct MenuRow: View {
+    let title: String
+    let icon: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+                .padding(.horizontal, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(hovering ? Color.accentColor.opacity(0.2) : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }

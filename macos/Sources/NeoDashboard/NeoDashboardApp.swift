@@ -21,8 +21,18 @@ struct NeoDashboardApp: App {
                 .environmentObject(env)
                 .frame(minWidth: 640, idealWidth: 1280,
                        minHeight: 240, idealHeight: 480)
+                .onAppear { setPreviewWindowFloating() }
         }
         .commandsRemoved()
+    }
+}
+
+@MainActor
+private func setPreviewWindowFloating() {
+    Task { @MainActor in
+        for w in NSApp.windows where w.title.contains("Live Preview") {
+            w.level = .floating
+        }
     }
 }
 
@@ -48,6 +58,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         didStart = true
         menuBar = MenuBarController(env: env)
         env.start()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            for w in NSApp.windows where w.title.contains("Live Preview") {
+                w.close()
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
