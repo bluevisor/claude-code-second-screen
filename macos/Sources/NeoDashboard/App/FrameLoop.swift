@@ -11,7 +11,7 @@ import CoreGraphics
 import Foundation
 import os
 import os.log
-import os
+import QuartzCore
 
 @MainActor
 final class FrameLoop {
@@ -40,8 +40,34 @@ final class FrameLoop {
     /// extra locking. Allocated lazily on first non-zero rotation.
     private let orientationCtx = OrientationContextPool()
 
+    private let startTime = CACurrentMediaTime()
     private var lastDiagnosticLog = Date()
     private var skippedFrames = 0
+
+    // MARK: - Per-phase timing (self-profiler)
+    //
+    // Tracks wall-clock duration of each render phase across frames.
+    // Every 10 s the diagnostic log emits the average + max of each
+    // phase so we can see which one is getting slower over hours
+    // without needing Instruments running the whole time.
+    private struct PhaseTiming: @unchecked Sendable {
+        var renderMs: [Double] = []
+        var crtMs: [Double] = []
+        var jpegMs: [Double] = []
+        var hidMs: [Double] = []
+        var orientMs: [Double] = []
+        var totalMs: [Double] = []
+        var jpegKB: Int = 0
+        mutating func reset() {
+            renderMs.removeAll(keepingCapacity: true)
+            crtMs.removeAll(keepingCapacity: true)
+            jpegMs.removeAll(keepingCapacity: true)
+            hidMs.removeAll(keepingCapacity: true)
+            orientMs.removeAll(keepingCapacity: true)
+            totalMs.removeAll(keepingCapacity: true)
+        }
+    }
+    private let phaseTiming = OSAllocatedUnfairLock(initialState: PhaseTiming())
 
     /// Transition state between dashboard ↔ clock fallback. A swap fades
     /// the *current* renderer out to black, switches, then fades the new
@@ -118,8 +144,6 @@ final class FrameLoop {
 
     private func renderTick() {
         guard let env else { return }
-        // Track skipped frames
-        let frameStartTime = Date()
         // Coalesce: if HID is still pushing the previous frame, skip this
         // tick entirely. The next tick will pick up fresh telemetry + now.
         let shouldRun = workerState.withLock { s -> Bool in
@@ -138,13 +162,8 @@ final class FrameLoop {
         blink += 1.0 / max(1, Double(env.targetFPS))
         let phase = blink
 
-        // Drive the fade state machine on the main actor before handing the
-        // result off to the work queue. The active renderer + black overlay
-        // alpha are decided here so the worker doesn't touch shared state.
         let wantsClock = env.resolveWantsClock(for: tel)
         let (clockMode, blackAlpha) = stepFade(wantsClock: wantsClock, now: now)
-        // Capture everything the worker needs into Sendable locals before
-        // dispatching, so the closure doesn't reach into main-actor state.
         let activeRenderer = self.renderer
         let clockRenderer = self.clockRenderer
         let encoder = self.encoder
@@ -152,20 +171,15 @@ final class FrameLoop {
         let workerState = self.workerState
         let previewVisible = env.previewWindowVisible
         let orientationCtx = self.orientationCtx
+        let phaseTiming = self.phaseTiming
+        let logger = self.logger
 
-        workQueue.async { [weak env, self] in
+        workQueue.async { [weak env] in
             defer { workerState.withLock { $0.inFlight = false } }
-            // Background DispatchQueues don't drain the thread's
-            // autorelease pool between blocks, so without an explicit
-            // pool every NSColor/NSAttributedString/CTLine/NSMutableData
-            // allocated by the render + JPEG path piles up indefinitely.
-            // Over hours at 30 fps this is the source of multi-GB
-            // residency growth that drags the whole machine into swap.
             autoreleasepool {
+                let t0 = CACurrentMediaTime()
                 let base: CGImage?
                 if clockMode {
-                    // Prefer the active renderer's themed clock; fall back to
-                    // the generic phosphor one if it doesn't override.
                     base = activeRenderer.renderClock(blink: phase, now: now,
                                                       blackAlpha: blackAlpha)
                         ?? clockRenderer.render(tel, blink: phase, now: now,
@@ -174,39 +188,60 @@ final class FrameLoop {
                     base = activeRenderer.render(tel, blink: phase, now: now,
                                                  blackAlpha: blackAlpha)
                 }
+                let t1 = CACurrentMediaTime()
                 guard let raw = base else { return }
-                // LCD gets the oriented frame; preview always shows the raw
-                // landscape so the user can read it on screen. When nothing
-                // re-orients the frame (the common case), `lcdImg === raw` and
-                // we only need to JPEG-encode once.
                 let lcdImg = Self.oriented(raw, pool: orientationCtx,
                                            rotation: rotation,
                                            flipH: flipH, flipV: flipV) ?? raw
-                if pushToLCD, let jpeg = encoder.encode(lcdImg) {
+                let t2 = CACurrentMediaTime()
+                let jpeg = pushToLCD ? encoder.encode(lcdImg) : nil
+                let t3 = CACurrentMediaTime()
+                let jpegKB = (jpeg?.count ?? 0) / 1024
+                if let jpeg {
                     _ = driver.send(jpeg)
                 }
-                // Preview CGImage update is throttled by whether the window
-                // is on-screen — when it's closed, nothing reads
-                // `lastFramePreview` so we skip the main-actor hop entirely.
-                if previewVisible {
-                    Task { @MainActor in
-                        env?.updatePreview(image: raw)
-                    }
+                let t4 = CACurrentMediaTime()
+                let crtMs = activeRenderer.lastCRTMs
+                phaseTiming.withLock { t in
+                    t.renderMs.append((t1 - t0) * 1000)
+                    t.crtMs.append(crtMs)
+                    t.orientMs.append((t2 - t1) * 1000)
+                    t.jpegMs.append((t3 - t2) * 1000)
+                    t.hidMs.append((t4 - t3) * 1000)
+                    t.totalMs.append((t4 - t0) * 1000)
+                    t.jpegKB = jpegKB
                 }
-                // Periodic diagnostics every 10 seconds
-                let now = Date()
-                Task { @MainActor in
-                    if now.timeIntervalSince(self.lastDiagnosticLog) > 10 {
-                        let usedMB = Self.currentMemoryUsageMB()
-                        self.logger.info("[framedrop diag] mem: \(usedMB) MB, skipped: \(self.skippedFrames)")
-                        if usedMB > 1800 {
-                            self.logger.error("[framedrop diag] HIGH MEMORY: \(usedMB) MB, skipped: \(self.skippedFrames)")
-                        }
-                        self.lastDiagnosticLog = now
-                        self.skippedFrames = 0
-                    }
+                if previewVisible {
+                    Task { @MainActor in env?.updatePreview(image: raw) }
                 }
             }
+        }
+        // Diagnostic log check stays on the main actor — no Task dispatch
+        // needed. Previously this created 30 Tasks/sec on the main actor
+        // from the work queue, almost all of which did nothing.
+        let now2 = Date()
+        if now2.timeIntervalSince(lastDiagnosticLog) > 10 {
+            let usedMB = Self.currentMemoryUsageMB()
+            let phaseSnapshot = phaseTiming.withLock { t -> String in
+                func stats(_ arr: [Double]) -> String {
+                    guard !arr.isEmpty else { return "—" }
+                    let avg = arr.reduce(0, +) / Double(arr.count)
+                    let mx = arr.max() ?? 0
+                    return String(format: "avg=%.1f max=%.1f", avg, mx)
+                }
+                let s = "render(\(stats(t.renderMs))) crt(\(stats(t.crtMs))) orient(\(stats(t.orientMs))) jpeg(\(stats(t.jpegMs))) hid(\(stats(t.hidMs))) total(\(stats(t.totalMs))) n=\(t.totalMs.count) jpegKB=\(t.jpegKB)"
+                t.reset()
+                return s
+            }
+            let elapsed = Int(CACurrentMediaTime() - startTime)
+            let h = elapsed / 3600, m = (elapsed % 3600) / 60, s = elapsed % 60
+            let ts = String(format: "T+%02d:%02d:%02d", h, m, s)
+            logger.warning("[perf \(ts, privacy: .public)] \(phaseSnapshot, privacy: .public) | mem=\(usedMB)MB skip=\(self.skippedFrames)")
+            if usedMB > 1800 {
+                logger.warning("[perf] HIGH MEMORY: \(usedMB) MB")
+            }
+            lastDiagnosticLog = now2
+            skippedFrames = 0
         }
     }
 

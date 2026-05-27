@@ -307,8 +307,8 @@ final class AnimalCrossingRenderer: FrameRenderer, @unchecked Sendable {
         x += 36
         let cal = Calendar(identifier: .gregorian)
         let comps = cal.dateComponents([.weekday, .day, .month], from: now)
-        let weekday = DateFormatter().weekdaySymbols[(comps.weekday ?? 1) - 1].uppercased()
-        let monthName = DateFormatter().monthSymbols[(comps.month ?? 1) - 1]
+        let weekday = Self.sharedFormatter.weekdaySymbols[(comps.weekday ?? 1) - 1].uppercased()
+        let monthName = Self.sharedFormatter.monthSymbols[(comps.month ?? 1) - 1]
         let dateText = "\(weekday) · \(monthName.uppercased()) \(comps.day ?? 0)"
         let dateFont = roundedFont(28, weight: .heavy)
         textBaselineMid(ctx, dateText, font: dateFont, color: palette.text,
@@ -827,15 +827,29 @@ final class AnimalCrossingRenderer: FrameRenderer, @unchecked Sendable {
 
     // MARK: - Text primitives
 
-    /// Mirrors `MatrixTheme.fontScale` — one knob to nudge every glyph in
-    /// the Cozy dashboard at once.
+    private nonisolated(unsafe) static let sharedFormatter = DateFormatter()
+
     private static let fontScale: CGFloat = 1.10
+
+    private nonisolated(unsafe) static let roundedFontCache: NSCache<NSString, NSFont> = {
+        let c = NSCache<NSString, NSFont>()
+        c.countLimit = 32
+        return c
+    }()
 
     private func roundedFont(_ size: CGFloat, weight: NSFont.Weight) -> NSFont {
         let scaled = (size * Self.fontScale).rounded()
+        let key = "\(scaled)|\(weight.rawValue)" as NSString
+        if let cached = Self.roundedFontCache.object(forKey: key) { return cached }
         let base = NSFont.systemFont(ofSize: scaled, weight: weight)
-        guard let d = base.fontDescriptor.withDesign(.rounded) else { return base }
-        return NSFont(descriptor: d, size: scaled) ?? base
+        let font: NSFont
+        if let d = base.fontDescriptor.withDesign(.rounded) {
+            font = NSFont(descriptor: d, size: scaled) ?? base
+        } else {
+            font = base
+        }
+        Self.roundedFontCache.setObject(font, forKey: key)
+        return font
     }
 
     /// Draw text where `(x, y)` is the top-left of the cap-box.

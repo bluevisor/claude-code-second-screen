@@ -190,10 +190,24 @@ final class ImageRenderer: FrameRenderer, @unchecked Sendable {
         big.height * 0.20 + small.height * 0.0
     }
 
+    private nonisolated(unsafe) static let roundedFontCache: NSCache<NSString, NSFont> = {
+        let c = NSCache<NSString, NSFont>()
+        c.countLimit = 16
+        return c
+    }()
+
     private func roundedFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {
+        let key = "\(size)|\(weight.rawValue)" as NSString
+        if let cached = Self.roundedFontCache.object(forKey: key) { return cached }
         let base = NSFont.systemFont(ofSize: size, weight: weight)
-        guard let d = base.fontDescriptor.withDesign(.rounded) else { return base }
-        return NSFont(descriptor: d, size: size) ?? base
+        let font: NSFont
+        if let d = base.fontDescriptor.withDesign(.rounded) {
+            font = NSFont(descriptor: d, size: size) ?? base
+        } else {
+            font = base
+        }
+        Self.roundedFontCache.setObject(font, forKey: key)
+        return font
     }
 
     private func loadImage() -> CGImage? {

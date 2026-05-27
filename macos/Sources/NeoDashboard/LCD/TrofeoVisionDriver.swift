@@ -222,6 +222,12 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
         if let product = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String {
             logger.info("LCD product: \(product, privacy: .public)")
         }
+        if let maxOut = IOHIDDeviceGetProperty(device, kIOHIDMaxOutputReportSizeKey as CFString) as? Int {
+            logger.warning("LCD maxOutputReportSize: \(maxOut, privacy: .public)")
+        }
+        if let maxIn = IOHIDDeviceGetProperty(device, kIOHIDMaxInputReportSizeKey as CFString) as? Int {
+            logger.warning("LCD maxInputReportSize: \(maxIn, privacy: .public)")
+        }
 
         registerInputCallback(dev: device)
 
@@ -313,26 +319,85 @@ final class TrofeoVisionDriver: LCDOutput, @unchecked Sendable {
         stateLock.unlock()
         guard let dev else { return false }
         let (w, h) = resolution
-        let packet = TRCCFraming.buildFramePacket(jpeg: jpeg, width: w, height: h)
-        let ok = packet.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+        TRCCFraming.validateJPEG(jpeg)
+        let total = TRCCFraming.paddedFramePacketSize(jpegLength: jpeg.count)
+
+        // Avoid materializing a full padded frame packet. The first report
+        // is header + JPEG prefix, full middle reports point straight into
+        // the JPEG bytes, and only the final short report is copied into a
+        // zero-padded scratch buffer.
+        let ok = jpeg.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
             guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return false
             }
-            var offset = 0
-            while offset < packet.count {
-                let len = min(Self.chunkSize, packet.count - offset)
-                let r = IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0,
-                                             base.advanced(by: offset), len)
-                if r != kIOReturnSuccess {
-                    logger.error("send failed at offset \(offset)/\(packet.count): IOHIDDeviceSetReport returned \(String(format: "0x%08x", r), privacy: .public)")
-                    return false
+            var firstReport = [UInt8](repeating: 0, count: Self.chunkSize)
+            let firstPayload = min(jpeg.count,
+                                   Self.chunkSize - TRCCFraming.frameHeaderSize)
+            firstReport.withUnsafeMutableBufferPointer { buf in
+                TRCCFraming.writeFrameHeader(into: buf,
+                                             jpegLength: jpeg.count,
+                                             width: w,
+                                             height: h)
+                buf.baseAddress!
+                    .advanced(by: TRCCFraming.frameHeaderSize)
+                    .update(from: base, count: firstPayload)
+            }
+            let firstOK = firstReport.withUnsafeBufferPointer { buf in
+                sendReport(device: dev,
+                           bytes: buf.baseAddress!,
+                           length: Self.chunkSize,
+                           offset: 0,
+                           total: total)
+            }
+            guard firstOK else { return false }
+
+            var jpegOffset = firstPayload
+            var packetOffset = Self.chunkSize
+            while jpegOffset < jpeg.count {
+                let remaining = jpeg.count - jpegOffset
+                if remaining >= Self.chunkSize {
+                    let ok = sendReport(device: dev,
+                                        bytes: base.advanced(by: jpegOffset),
+                                        length: Self.chunkSize,
+                                        offset: packetOffset,
+                                        total: total)
+                    if !ok { return false }
+                    jpegOffset += Self.chunkSize
+                    packetOffset += Self.chunkSize
+                } else {
+                    var tailReport = [UInt8](repeating: 0, count: Self.chunkSize)
+                    tailReport.withUnsafeMutableBufferPointer { buf in
+                        buf.baseAddress!
+                            .update(from: base.advanced(by: jpegOffset),
+                                    count: remaining)
+                    }
+                    let ok = tailReport.withUnsafeBufferPointer { buf in
+                        sendReport(device: dev,
+                                   bytes: buf.baseAddress!,
+                                   length: Self.chunkSize,
+                                   offset: packetOffset,
+                                   total: total)
+                    }
+                    if !ok { return false }
+                    jpegOffset = jpeg.count
                 }
-                offset += len
             }
             return true
         }
-        guard ok else { return false }
-        try? Thread.sleep(forSeconds: 0.001)
+        return ok
+    }
+
+    private func sendReport(device: IOHIDDevice,
+                            bytes: UnsafePointer<UInt8>,
+                            length: Int,
+                            offset: Int,
+                            total: Int) -> Bool {
+        let r = IOHIDDeviceSetReport(device, kIOHIDReportTypeOutput, 0,
+                                     bytes, length)
+        if r != kIOReturnSuccess {
+            logger.error("send failed at offset \(offset)/\(total): IOHIDDeviceSetReport returned \(String(format: "0x%08x", r), privacy: .public)")
+            return false
+        }
         return true
     }
 

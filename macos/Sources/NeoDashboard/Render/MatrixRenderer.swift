@@ -21,8 +21,8 @@ final class MatrixRenderer: @unchecked Sendable {
     private var staticBackground: CGImage?
     private let rain: RainPainter
     private let showRain: Bool
-    /// Barrel + chromatic-aberration pass applied as a final post-process.
     private let crt = CRTPostProcessor()
+    var lastCRTMs: Double { crt.lastProcessMs }
 
     /// Portrait when the canvas is taller than it is wide — triggers the
     /// vertical-stack layout used on 90°/270° rotations.
@@ -77,11 +77,10 @@ final class MatrixRenderer: @unchecked Sendable {
                    locations: [0, 0.5, 1])!
     }()
 
-    /// Pre-baked scanline strap — 1px black rows every 2px at the
-    /// renderer's only caller-opacity (0.78), composited as a single
-    /// `ctx.draw` per frame instead of ~240 (landscape) or ~640
-    /// (portrait) `ctx.fill` calls.
-    private lazy var scanlineImage: CGImage? = {
+    /// Pre-baked scanline + vignette overlay — combines both effects into
+    /// one `ctx.draw` per frame instead of two (scanline image stamp +
+    /// radial gradient draw).
+    private lazy var overlayImage: CGImage? = {
         guard let ctx = CGContext(
             data: nil,
             width: Int(size.width), height: Int(size.height),
@@ -90,12 +89,21 @@ final class MatrixRenderer: @unchecked Sendable {
             bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
                 | CGBitmapInfo.byteOrder32Little.rawValue
         ) else { return nil }
+        // Scanlines
         ctx.setFillColor(NSColor.black.withAlphaComponent(0.30 * 0.78).cgColor)
         var y: CGFloat = 0
         while y < size.height {
             ctx.fill(CGRect(x: 0, y: y, width: size.width, height: 1))
             y += 2
         }
+        // Vignette (y-up native CG coords, no flip needed)
+        let cx = size.width / 2, cy = size.height / 2
+        let inner = min(size.width, size.height) * 0.32
+        let outer = hypot(cx, cy) * 1.05
+        ctx.drawRadialGradient(vignetteGradient,
+            startCenter: CGPoint(x: cx, y: cy), startRadius: inner,
+            endCenter: CGPoint(x: cx, y: cy), endRadius: outer,
+            options: [])
         return ctx.makeImage()
     }()
 
@@ -109,9 +117,15 @@ final class MatrixRenderer: @unchecked Sendable {
     /// downstream consumers never see torn pixels.
     private var renderCtx: CGContext?
 
+    /// Pre-rendered panel chrome (gradient bg + border + corner brackets)
+    /// for all panels in the current layout. Built once on first render,
+    /// stamped as a single `ctx.draw` each frame instead of 4-5
+    /// individual gradient+stroke sequences (~3-4ms savings).
+    private var panelChromeImage: CGImage?
+
     init(size: CGSize = MatrixTheme.canvasSize,
          showRain: Bool = true,
-         rainFPS: Double = 30) {
+         rainFPS: Double = 15) {
         self.size = size
         self.showRain = showRain
         self.rain = RainPainter(canvasSize: size, stepHz: rainFPS)
@@ -143,8 +157,7 @@ final class MatrixRenderer: @unchecked Sendable {
             layoutLandscape(into: ctx, tel: tel, blink: blink, now: now)
         }
 
-        drawScanlines(into: ctx, opacity: 0.78)
-        drawVignette(into: ctx, strength: 0.42)
+        drawOverlay(into: ctx)
 
         // Fade overlay (if active) goes on top before CRT so it darkens
         // the chromatic-aberration pass too — visually identical to the
@@ -219,22 +232,15 @@ final class MatrixRenderer: @unchecked Sendable {
         let subsRect = CGRect(x: rightX, y: mainRect.minY + quotaH + vGap,
                               width: colR, height: mainH - quotaH - vGap)
 
+        drawCachedPanelChrome(into: ctx)
         drawRail(into: ctx, rect: railRect, tel: tel, now: now)
-        drawPanel(ctx, rect: agentRect)
         drawAgentPanel(into: ctx, rect: agentRect, tel: tel, blink: blink, now: now)
-        drawPanel(ctx, rect: modelRect)
         drawModelPanel(into: ctx, rect: modelRect, tel: tel)
-        drawPanel(ctx, rect: quotaRect)
         drawQuotaPanel(into: ctx, rect: quotaRect, tel: tel)
-        drawPanel(ctx, rect: subsRect)
         drawSubAgentsPanel(into: ctx, rect: subsRect, tel: tel)
         drawFooter(into: ctx, rect: footerRect, tel: tel, now: now)
     }
 
-    /// Vertical 480×1280 layout used when the LCD is rotated 90°/270°.
-    /// Panels stack top-to-bottom: rail → agent → model → quota →
-    /// sub-agents → footer. Two-row rail/footer accommodate the narrow
-    /// width — content that fit in one line at 1280 needs to wrap here.
     private func layoutPortrait(into ctx: CGContext, tel: Telemetry,
                                 blink: Double, now: Date) {
         let padX: CGFloat = 18
@@ -244,16 +250,9 @@ final class MatrixRenderer: @unchecked Sendable {
         let footerH: CGFloat = 72
         let gap: CGFloat = 10
         let frameW = size.width - 2 * padX
-
-        // Vertical budget for the four panels after rail/footer/padding/gaps.
-        // Six gaps: rail→agent, agent→model, model→quota, quota→subs,
-        // subs→footer, plus the outer top/bottom padding handled separately.
         let stackTop = padTop + railH + gap
         let stackBot = size.height - padBot - footerH - gap
         let stackH = max(0, stackBot - stackTop)
-        // Panels get fixed shares of the stack height: agent and model are
-        // the busy ones, so they win. Sub-agents is allowed to absorb any
-        // residual when the math doesn't divide cleanly.
         let interGap: CGFloat = 10
         let totalGaps = 3 * interGap
         let usable = max(0, stackH - totalGaps)
@@ -261,7 +260,6 @@ final class MatrixRenderer: @unchecked Sendable {
         let modelH = (usable * 0.41).rounded()
         let quotaH = (usable * 0.16).rounded()
         let subsH  = max(0, usable - agentH - modelH - quotaH)
-
         let railRect = CGRect(x: padX, y: padTop, width: frameW, height: railH)
         var y = stackTop
         let agentRect = CGRect(x: padX, y: y, width: frameW, height: agentH)
@@ -275,14 +273,11 @@ final class MatrixRenderer: @unchecked Sendable {
                                 y: size.height - padBot - footerH,
                                 width: frameW, height: footerH)
 
+        drawCachedPanelChrome(into: ctx)
         drawRailPortrait(into: ctx, rect: railRect, tel: tel, now: now)
-        drawPanel(ctx, rect: agentRect)
         drawAgentPanel(into: ctx, rect: agentRect, tel: tel, blink: blink, now: now)
-        drawPanel(ctx, rect: modelRect)
         drawModelPanel(into: ctx, rect: modelRect, tel: tel)
-        drawPanel(ctx, rect: quotaRect)
         drawQuotaPanel(into: ctx, rect: quotaRect, tel: tel)
-        drawPanel(ctx, rect: subsRect)
         drawSubAgentsPanel(into: ctx, rect: subsRect, tel: tel)
         drawFooterPortrait(into: ctx, rect: footerRect, tel: tel, now: now)
     }
@@ -300,16 +295,8 @@ final class MatrixRenderer: @unchecked Sendable {
         }
     }
 
-    private func drawScanlines(into ctx: CGContext, opacity: CGFloat) {
-        // Opacity is preserved on the signature but unused — the only
-        // caller passes 0.78, baked into `scanlineImage`. If we ever
-        // need variable opacity, fall back to the per-row fill loop.
-        _ = opacity
-        guard let img = scanlineImage else { return }
-        // `ctx` is already y-flipped (screen coords). A naive
-        // `ctx.draw(img, in:)` would render the image upside-down;
-        // counter-flip locally so image y=0 lands at screen y=0 — same
-        // pattern ClockRenderer uses for its cached static layer.
+    private func drawOverlay(into ctx: CGContext) {
+        guard let img = overlayImage else { return }
         ctx.saveGState()
         ctx.translateBy(x: 0, y: size.height)
         ctx.scaleBy(x: 1, y: -1)
@@ -317,31 +304,98 @@ final class MatrixRenderer: @unchecked Sendable {
         ctx.restoreGState()
     }
 
-    /// CRT-style edge vignette — radial gradient from clear at the center
-    /// of the canvas to translucent black at the corners. The strength
-    /// is baked into `vignetteGradient` (0.42) since the only caller
-    /// passes that value; if other strengths are ever needed, swap to a
-    /// per-strength cache. Inner clear radius scales with the shorter
-    /// canvas axis so the result reads the same on any size.
-    private func drawVignette(into ctx: CGContext, strength: CGFloat) {
-        _ = strength
-        let centerX = size.width / 2
-        let centerY = size.height / 2
-        let innerRadius = min(size.width, size.height) * 0.32
-        let outerRadius = hypot(centerX, centerY) * 1.05
+    // MARK: - Panel chrome
+
+    private func ensurePanelChrome() -> CGImage? {
+        if let panelChromeImage { return panelChromeImage }
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        ctx.translateBy(x: 0, y: size.height)
+        ctx.scaleBy(x: 1, y: -1)
+        let rects: [CGRect]
+        if isPortrait {
+            rects = panelRectsPortrait()
+        } else {
+            rects = panelRectsLandscape()
+        }
+        for r in rects { drawPanelChrome(ctx, rect: r) }
+        panelChromeImage = ctx.makeImage()
+        return panelChromeImage
+    }
+
+    private func drawCachedPanelChrome(into ctx: CGContext) {
+        guard let img = ensurePanelChrome() else { return }
         ctx.saveGState()
-        ctx.drawRadialGradient(vignetteGradient,
-            startCenter: CGPoint(x: centerX, y: centerY),
-            startRadius: innerRadius,
-            endCenter: CGPoint(x: centerX, y: centerY),
-            endRadius: outerRadius,
-            options: [])
+        ctx.translateBy(x: 0, y: size.height)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(img, in: CGRect(origin: .zero, size: size))
         ctx.restoreGState()
     }
 
-    // MARK: - Panel chrome
+    private func panelRectsLandscape() -> [CGRect] {
+        let padX: CGFloat = 18
+        let padTop: CGFloat = 12
+        let padBot: CGFloat = 12
+        let railH: CGFloat = 34
+        let footerH: CGFloat = 38
+        let gapAbove: CGFloat = 10
+        let gapBelow: CGFloat = 8
+        let frameW = size.width - 2 * padX
+        let mainH = size.height - padTop - padBot - railH - footerH - gapAbove - gapBelow
+        let mainTop = padTop + railH + gapAbove
+        let mainRect = CGRect(x: padX, y: mainTop, width: frameW, height: mainH)
+        let gap: CGFloat = 14
+        let colL: CGFloat = 400
+        let colR: CGFloat = 400
+        let colM = frameW - colL - colR - 2 * gap
+        let agentRect = CGRect(x: mainRect.minX, y: mainRect.minY, width: colL, height: mainH)
+        let modelRect = CGRect(x: mainRect.minX + colL + gap, y: mainRect.minY,
+                               width: colM, height: mainH)
+        let rightX = mainRect.maxX - colR + 1
+        let quotaH: CGFloat = 158
+        let vGap: CGFloat = 8
+        let quotaRect = CGRect(x: rightX, y: mainRect.minY, width: colR, height: quotaH)
+        let subsRect = CGRect(x: rightX, y: mainRect.minY + quotaH + vGap,
+                              width: colR, height: mainH - quotaH - vGap)
+        return [agentRect, modelRect, quotaRect, subsRect]
+    }
 
-    private func drawPanel(_ ctx: CGContext, rect: CGRect) {
+    private func panelRectsPortrait() -> [CGRect] {
+        let padX: CGFloat = 18
+        let padTop: CGFloat = 12
+        let padBot: CGFloat = 12
+        let railH: CGFloat = 56
+        let footerH: CGFloat = 72
+        let gap: CGFloat = 10
+        let frameW = size.width - 2 * padX
+        let stackTop = padTop + railH + gap
+        let stackBot = size.height - padBot - footerH - gap
+        let stackH = max(0, stackBot - stackTop)
+        let interGap: CGFloat = 10
+        let totalGaps = 3 * interGap
+        let usable = max(0, stackH - totalGaps)
+        let agentH = (usable * 0.29).rounded()
+        let modelH = (usable * 0.41).rounded()
+        let quotaH = (usable * 0.16).rounded()
+        let subsH  = max(0, usable - agentH - modelH - quotaH)
+        var y = stackTop
+        let agentRect = CGRect(x: padX, y: y, width: frameW, height: agentH)
+        y += agentH + interGap
+        let modelRect = CGRect(x: padX, y: y, width: frameW, height: modelH)
+        y += modelH + interGap
+        let quotaRect = CGRect(x: padX, y: y, width: frameW, height: quotaH)
+        y += quotaH + interGap
+        let subsRect = CGRect(x: padX, y: y, width: frameW, height: subsH)
+        return [agentRect, modelRect, quotaRect, subsRect]
+    }
+
+    private func drawPanelChrome(_ ctx: CGContext, rect: CGRect) {
         // Translucent background gradient.
         ctx.saveGState()
         ctx.addRect(rect); ctx.clip()

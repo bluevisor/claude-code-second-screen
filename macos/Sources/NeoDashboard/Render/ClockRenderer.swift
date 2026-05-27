@@ -14,6 +14,7 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     private let rain: RainPainter
     private let showRain: Bool
     private let crt = CRTPostProcessor()
+    var lastCRTMs: Double { crt.lastProcessMs }
     /// Cached layer that holds every element that doesn't change between
     /// most frames — gradient, corner brackets, top strip date, bottom
     /// strip weather, status pill. Invalidated when `date` or `weather`
@@ -55,7 +56,7 @@ final class ClockRenderer: FrameRenderer, @unchecked Sendable {
     init(size: CGSize = MatrixTheme.canvasSize, showRain: Bool = true) {
         self.size = size
         self.showRain = showRain
-        self.rain = RainPainter(canvasSize: size, stepHz: 30)
+        self.rain = RainPainter(canvasSize: size, stepHz: 15)
     }
 
     func render(_ telemetry: Telemetry, blink: Double, now: Date,

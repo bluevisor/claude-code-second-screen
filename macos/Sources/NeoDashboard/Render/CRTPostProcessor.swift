@@ -5,6 +5,7 @@ import CoreGraphics
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
+import QuartzCore
 
 final class CRTPostProcessor {
     private let context: CIContext
@@ -34,6 +35,8 @@ final class CRTPostProcessor {
     /// Flush every ~30 s at 30 fps.
     private var framesSinceFlush = 0
     private let framesPerFlush = 150
+    /// Last process() wall-clock duration in milliseconds.
+    private(set) var lastProcessMs: Double = 0
 
     init() {
         // Skip the software fallback — we ship to Metal-capable Macs only.
@@ -66,6 +69,7 @@ final class CRTPostProcessor {
     /// Returns a new CGImage with CRT post-effects applied. Falls back to
     /// the input on any filter setup error.
     func process(_ image: CGImage) -> CGImage? {
+        let t0 = CACurrentMediaTime()
         let input = CIImage(cgImage: image)
         let extent = input.extent
 
@@ -89,6 +93,7 @@ final class CRTPostProcessor {
         guard let combined = combineRGB.outputImage else { return image }
 
         let result = context.createCGImage(combined.cropped(to: extent), from: extent) ?? image
+        lastProcessMs = (CACurrentMediaTime() - t0) * 1000
         framesSinceFlush += 1
         if framesSinceFlush >= framesPerFlush {
             framesSinceFlush = 0

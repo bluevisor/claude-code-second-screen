@@ -24,10 +24,14 @@ protocol FrameRenderer: AnyObject, Sendable {
     /// `ClockRenderer` (matrix-themed). Implementations that want their
     /// theme to carry through the clock fallback should override.
     func renderClock(blink: Double, now: Date, blackAlpha: Double) -> CGImage?
+
+    /// Last CRT post-processing duration in ms. Renderers without CRT return 0.
+    var lastCRTMs: Double { get }
 }
 
 extension FrameRenderer {
     func renderClock(blink: Double, now: Date, blackAlpha: Double) -> CGImage? { nil }
+    var lastCRTMs: Double { 0 }
 }
 
 extension MatrixRenderer: FrameRenderer {}

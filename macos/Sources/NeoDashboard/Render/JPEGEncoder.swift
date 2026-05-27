@@ -13,7 +13,7 @@ import UniformTypeIdentifiers
 final class JPEGEncoder: @unchecked Sendable {
     var quality: CGFloat
 
-    init(quality: CGFloat = 0.85) {
+    init(quality: CGFloat = 0.25) {
         self.quality = quality
     }
 

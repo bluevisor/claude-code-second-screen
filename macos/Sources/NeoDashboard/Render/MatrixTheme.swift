@@ -99,11 +99,11 @@ enum MatrixTheme {
     /// Returns a cached attribute dictionary for `(font, color)`. The
     /// renderer hits this on every text draw — the previous code
     /// allocated a fresh `[NSAttributedString.Key: Any]` each call.
-    /// Keys use the address of the font and the components of the
-    /// color so identity comparisons stay cheap. The pool tops out at
-    /// a small handful of distinct combinations across the dashboard.
+    /// Keys use the object identity of the font and color. The matrix
+    /// renderer passes static theme colors, so identity is stable and
+    /// avoids asking CGColor for component arrays on every CTLine miss.
     static func attributes(font: NSFont, color: NSColor) -> [NSAttributedString.Key: Any] {
-        let key = "\(ObjectIdentifier(font).hashValue)|\(color.cgColor.numberOfComponents)|\(color.cgColor.components ?? [0])" as NSString
+        let key = "\(ObjectIdentifier(font).hashValue)|\(ObjectIdentifier(color).hashValue)" as NSString
         if let cached = attrCache.object(forKey: key) {
             // NSDictionary holds Any values; cast to Swift dict.
             // The conversion is cheap because the underlying storage
