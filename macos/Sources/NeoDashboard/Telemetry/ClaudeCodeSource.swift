@@ -36,6 +36,7 @@ final class ClaudeCodeSource: TelemetrySource {
     private var scannedOtherSessions = false
     private var dirty = true
     private var cachedTelemetry: Telemetry?
+    private var bootstrapping = false
     /// Bounds on the in-memory event ring. Long-running Claude sessions
     /// (8h+ of dense agent loops) otherwise grow `events` without limit;
     /// each tick then re-scans the whole array several times. Mirrors
@@ -56,10 +57,23 @@ final class ClaudeCodeSource: TelemetrySource {
     func tick() -> Telemetry {
         refreshActiveFile()
         tailNewLines()
-        if !scannedOtherSessions {
-            bootstrapTokenHistoryFromOtherSessions()
-            scannedOtherSessions = true
-            dirty = true
+        if !scannedOtherSessions, !bootstrapping {
+            bootstrapping = true
+            let projectsDir = self.projectsDir
+            let activeJsonl = self.jsonl
+            let logger = self.logger
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let samples = Self.scanTokenHistory(projectsDir: projectsDir,
+                                                     exclude: activeJsonl)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.tokenHistory.append(contentsOf: samples)
+                    self.tokenHistory.sort { $0.ts < $1.ts }
+                    self.scannedOtherSessions = true
+                    self.dirty = true
+                    logger.info("bootstrapped token history: \(self.tokenHistory.count) events (added \(samples.count))")
+                }
+            }
         }
         if dirty {
             cachedTelemetry = buildTelemetry()
@@ -222,40 +236,41 @@ final class ClaudeCodeSource: TelemetrySource {
         }
     }
 
-    private func bootstrapTokenHistoryFromOtherSessions() {
+    private static func scanTokenHistory(projectsDir: URL,
+                                          exclude: URL?) -> [TokenSample] {
         let cutoff = Date.now.timeIntervalSince1970 - 7 * 86400
         let fm = FileManager.default
         guard let it = fm.enumerator(at: projectsDir,
                                      includingPropertiesForKeys: [.contentModificationDateKey],
-                                     options: [.skipsHiddenFiles]) else { return }
-        var added = 0
+                                     options: [.skipsHiddenFiles]) else { return [] }
+        var samples: [TokenSample] = []
         for case let url as URL in it where url.pathExtension == "jsonl" {
-            if url == jsonl { continue }
+            if url == exclude { continue }
             let attrs = try? url.resourceValues(forKeys: [.contentModificationDateKey])
             guard let mtime = attrs?.contentModificationDate?.timeIntervalSince1970,
                   mtime >= cutoff else { continue }
-            guard let data = try? Data(contentsOf: url) else { continue }
-            let s = String(data: data, encoding: .utf8) ?? ""
-            for line in s.split(separator: "\n", omittingEmptySubsequences: true) {
-                guard let d = line.data(using: .utf8),
-                      let any = try? JSONSerialization.jsonObject(with: d, options: []),
-                      let dict = any as? [String: Any] else { continue }
-                let ev = Event(raw: dict)
-                if ev.type != "assistant" { continue }
-                if ev.timestamp < cutoff { continue }
-                guard let u = ev.usage else { continue }
-                let total = u.input + u.output + u.cacheRead + u.cacheCreate
-                if total <= 0 { continue }
-                tokenHistory.append(TokenSample(
-                    ts: ev.timestamp,
-                    input: u.input, output: u.output,
-                    cacheRead: u.cacheRead, cacheCreate: u.cacheCreate
-                ))
-                added += 1
+            autoreleasepool {
+                guard let data = try? Data(contentsOf: url) else { return }
+                let s = String(data: data, encoding: .utf8) ?? ""
+                for line in s.split(separator: "\n", omittingEmptySubsequences: true) {
+                    guard let d = line.data(using: .utf8),
+                          let any = try? JSONSerialization.jsonObject(with: d, options: []),
+                          let dict = any as? [String: Any] else { continue }
+                    let ev = Event(raw: dict)
+                    if ev.type != "assistant" { continue }
+                    if ev.timestamp < cutoff { continue }
+                    guard let u = ev.usage else { continue }
+                    let total = u.input + u.output + u.cacheRead + u.cacheCreate
+                    if total <= 0 { continue }
+                    samples.append(TokenSample(
+                        ts: ev.timestamp,
+                        input: u.input, output: u.output,
+                        cacheRead: u.cacheRead, cacheCreate: u.cacheCreate
+                    ))
+                }
             }
         }
-        tokenHistory.sort { $0.ts < $1.ts }
-        logger.info("bootstrapped token history: \(self.tokenHistory.count) events (added \(added))")
+        return samples
     }
 
     // MARK: - Derivation

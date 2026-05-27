@@ -4,6 +4,7 @@
 import Combine
 import Foundation
 import SwiftUI
+import UserNotifications
 
 @MainActor
 final class AppEnvironment: ObservableObject {
@@ -297,7 +298,26 @@ final class AppEnvironment: ObservableObject {
     }
 
     func updateLCDStatus(_ s: LCDStatus) {
+        let prev = lcdStatus
         lcdStatus = s
+        if case .ready = prev, case .disconnected = s {
+            postLCDNotification(title: "LCD Disconnected",
+                                body: "The display was unplugged.")
+        } else if case .ready(let w, let h) = s, !(prev == s) {
+            postLCDNotification(title: "LCD Connected",
+                                body: "\(w)×\(h) display ready.")
+        }
+    }
+
+    private func postLCDNotification(title: String, body: String) {
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert]) { _, _ in }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        let req = UNNotificationRequest(identifier: "lcd-status",
+                                         content: content, trigger: nil)
+        center.add(req)
     }
 
     private func applySourceSelection() {
