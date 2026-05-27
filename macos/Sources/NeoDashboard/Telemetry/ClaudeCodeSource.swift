@@ -57,6 +57,13 @@ final class ClaudeCodeSource: TelemetrySource {
     func tick() -> Telemetry {
         refreshActiveFile()
         tailNewLines()
+        // Status derivation uses Date.now (age-based transitions like
+        // writing→idle after 3s), so rebuild even without new data
+        // when the current status is time-sensitive.
+        if !dirty, let cached = cachedTelemetry,
+           cached.agent.status != .idle {
+            dirty = true
+        }
         if !scannedOtherSessions, !bootstrapping {
             bootstrapping = true
             let projectsDir = self.projectsDir
