@@ -311,10 +311,10 @@ final class AppEnvironment: ObservableObject {
 
     private func postLCDNotification(title: String, body: String) {
         let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert]) { _, _ in }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
+        content.sound = .default
         let req = UNNotificationRequest(identifier: "lcd-status",
                                          content: content, trigger: nil)
         center.add(req)

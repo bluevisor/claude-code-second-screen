@@ -6,6 +6,7 @@
 // the optional live preview.
 
 import SwiftUI
+import UserNotifications
 
 @main
 struct NeoDashboardApp: App {
@@ -41,7 +42,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController?
     private var didStart = false
 
+    private let notificationDelegate = NotificationDelegate()
+
     func applicationDidFinishLaunching(_ note: Notification) {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = notificationDelegate
+        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         startWhenEnvironmentIsReady()
     }
 
@@ -77,5 +83,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.open(url)
         }
         return true
+    }
+}
+
+final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification) async
+        -> UNNotificationPresentationOptions {
+        [.banner, .sound]
     }
 }
