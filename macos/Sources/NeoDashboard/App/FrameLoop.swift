@@ -126,13 +126,17 @@ final class FrameLoop {
         // dashboard before the user's tool-result event closes the window.
         let telQ = self.telQueue
         let tel = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            guard let self, let env = self.env else { return }
-            let source = env.source
-            telQ.async {
-                autoreleasepool {
-                    let result = source.tick()
-                    Task { @MainActor in
-                        env.updateTelemetry(result)
+            Task { @MainActor [weak self] in
+                guard let self, let env = self.env else { return }
+                let source = env.source
+                nonisolated(unsafe) let src = source
+                nonisolated(unsafe) let e = env
+                telQ.async {
+                    autoreleasepool {
+                        let result = src.tick()
+                        Task { @MainActor in
+                            e.updateTelemetry(result)
+                        }
                     }
                 }
             }

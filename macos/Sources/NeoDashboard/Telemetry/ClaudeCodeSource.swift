@@ -62,16 +62,17 @@ final class ClaudeCodeSource: TelemetrySource {
             let projectsDir = self.projectsDir
             let activeJsonl = self.jsonl
             let logger = self.logger
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                let samples = Self.scanTokenHistory(projectsDir: projectsDir,
-                                                     exclude: activeJsonl)
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.tokenHistory.append(contentsOf: samples)
-                    self.tokenHistory.sort { $0.ts < $1.ts }
-                    self.scannedOtherSessions = true
-                    self.dirty = true
-                    logger.info("bootstrapped token history: \(self.tokenHistory.count) events (added \(samples.count))")
+            nonisolated(unsafe) let weakSelf = self
+            DispatchQueue.global(qos: .utility).async {
+                let samples = ClaudeCodeSource.scanTokenHistory(
+                    projectsDir: projectsDir, exclude: activeJsonl)
+                DispatchQueue.main.async {
+                    guard let s = Optional(weakSelf), s.bootstrapping else { return }
+                    s.tokenHistory.append(contentsOf: samples)
+                    s.tokenHistory.sort { $0.ts < $1.ts }
+                    s.scannedOtherSessions = true
+                    s.dirty = true
+                    logger.info("bootstrapped token history: \(s.tokenHistory.count) events (added \(samples.count))")
                 }
             }
         }

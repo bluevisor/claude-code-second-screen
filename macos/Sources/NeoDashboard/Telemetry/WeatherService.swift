@@ -113,7 +113,9 @@ final class WeatherService: @unchecked Sendable {
             }
         }
         if on {
-            NSApp.activate(ignoringOtherApps: true)
+            Task { @MainActor in
+                NSApp.activate(ignoringOtherApps: true)
+            }
         }
     }
 

@@ -827,7 +827,7 @@ final class AnimalCrossingRenderer: FrameRenderer, @unchecked Sendable {
 
     // MARK: - Text primitives
 
-    private nonisolated(unsafe) static let sharedFormatter = DateFormatter()
+    private static let sharedFormatter = DateFormatter()
 
     private static let fontScale: CGFloat = 1.10
 
